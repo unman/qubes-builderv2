@@ -14,17 +14,17 @@ LOGLEVEL=I
 USECOLORS=auto
 
 case ${DISTRIBUTION} in
-    buster|bullseye|bookworm|trixie|sid|experimental)
+    buster|bullseye|bookworm|trixie|forky|sid|experimental)
         DIST_VENDOR=debian
-        MIRRORSITE=https://deb.debian.org/debian
+        MIRRORSITE=http://deb.debian.org/debian
         ;;
     bionic|focal)
         DIST_VENDOR=ubuntu
         MIRRORSITE=http://archive.ubuntu.com/ubuntu
         ;;
-    jammy|noble)
+    jammy|noble|questing)
         DIST_VENDOR=ubuntu
-        MIRRORSITE=https://fr.archive.ubuntu.com/ubuntu
+        MIRRORSITE=http://10.137.0.68:8082/archive.ubuntu.com/ubuntu
         ;;
     *)
         echo "Unknown distribution: ${DISTRIBUTION}" >&2
@@ -44,6 +44,7 @@ BUILDDIR=/build
 BUILD_HOME=/nonexistent
 #OTHERMIRROR="deb http://www.home.com/updates/ ./"
 #export http_proxy=http://your-proxy:8080/
+export http_proxy=http://10.137.0.68:8082/
 USEPROC=yes
 USEDEVFS=no
 USEDEVPTS=yes
@@ -61,10 +62,10 @@ BUILDRESULT="@BUILDER_DIR@/pbuilder/results"
 # components on Debian use "main contrib non-free" and on Ubuntu "main
 # restricted universe multiverse"
 case ${DISTRIBUTION} in
-    buster|bullseye|bookworm|trixie|sid|experimental)
+    buster|bullseye|bookworm|trixie|forky|sid|experimental)
         COMPONENTS="main"
         ;;
-    bionic|focal|jammy|noble)
+    bionic|focal|jammy|noble|questing)
         COMPONENTS="main restricted universe multiverse"
         ;;
 esac
@@ -136,7 +137,7 @@ BINDMOUNTS=""
 
 # Set the debootstrap variant to 'buildd' type.
 DEBOOTSTRAPOPTS=(
-    '--variant=buildd'
+    '--variant=minbase'
     '--force-check-gpg'
     )
 # or unset it to make it not a buildd type.

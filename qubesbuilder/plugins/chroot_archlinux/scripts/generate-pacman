@@ -6,10 +6,11 @@ import pathlib
 from jinja2 import Environment, BaseLoader
 
 DEFAULT_SERVERS = [
-    "https://mirror.rackspace.com/archlinux",
-    "https://arch.mirror.constant.com",
-    "https://mirror.f4st.host/archlinux",
-    "https://mirrors.edge.kernel.org/archlinux",
+  "http://archlinux.thaller.ws/",
+  "http://arch.jensgutermuth.de/",
+  "http://mirror.cyberbits.eu/archlinux/",
+  "http://mirror.moson.org/arch/",
+  "http://mirror.trap.moe/archlinux/",
 ]
 
 

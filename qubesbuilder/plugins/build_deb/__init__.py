@@ -269,7 +269,7 @@ class DEBBuildPlugin(DEBDistributionPlugin, BuildPlugin):
                     f"> {self.executor.get_builder_dir()}/pbuilder/qubes-keyring.gpg"
                 ]
                 if self.config.use_qubes_repo.get("testing", False):
-                    extra_sources = f"{extra_sources}|deb [arch=amd64] https://{repo_server}/r{qubes_version}/vm {self.dist.name}-testing main"
+                    extra_sources = f"{extra_sources}|deb [arch=amd64] http://HTTPS///{repo_server}/r{qubes_version}/vm {self.dist.name}-testing main"
 
             # fmt: off
             # FIXME: We disable black here because it removes escaped quotes.

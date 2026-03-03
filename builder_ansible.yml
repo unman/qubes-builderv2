@@ -1,0 +1,50 @@
+git:
+  baseurl: https://github.com
+  prefix: QubesOS/qubes-
+  maintainers:
+    # marmarek
+    - '0064428F455451B3EBE78A7F063938BA42CFA724'
+    # simon
+    - '274E12AB03F2FE293765FC06DA0434BC706E1FCF'
+
+backend-vmm: xen
+debug: true
+verbose: true
+
+distributions:
+  - vm-fc40
+
+components:
+  - ansible:
+      url: https://github.com/fepitre/qubes-ansible
+      maintainers:
+        # fepitre's @invisiblethingslab.com
+        - 77EEEF6D0386962AEA8CF84A9B8273F80AC219E6
+
+
+
+#executor:
+#  type: docker
+#  options:
+#    image: "qubes-builder-fedora:latest"
+
+executor:
+  type: qubes
+  options:
+    dispvm: "@dispvm"
+
+stages:
+  - fetch
+  - prep
+  - build
+  - post
+  - verify
+  - sign:
+      executor:
+        type: local
+  - publish:
+      executor:
+        type: local
+  - upload:
+      executor:
+        type: local

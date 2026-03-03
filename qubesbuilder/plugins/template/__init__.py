@@ -268,23 +268,24 @@ class TemplateBuilderPlugin(TemplatePlugin):
                         "DERIVATIVE_APT_REPOSITORY_OPTS": "stable",
                     }
                 )
-            if self.template.flavor.startswith("kali"):
-                self.dependencies += [ComponentDependency("template-kali")]
-                template_content_dir = str(
-                    self.executor.get_sources_dir() / "template-kali"
-                )
-                self.environment.update(
-                    {
-                        "APPMENUS_DIR": template_content_dir,
-                        "FLAVORS_DIR": template_content_dir,
-                    }
-                )
-                template_flavor_dir += [
-                    f"+kali:{self.executor.get_sources_dir()}/template-kali",
-                    f"+kali-core:{self.executor.get_sources_dir()}/template-kali",
-                    f"+kali-large:{self.executor.get_sources_dir()}/template-kali",
-                    f"+kali-everything:{self.executor.get_sources_dir()}/template-kali",
-                ]
+
+#            if self.template.flavor.startswith("kali"):
+#                self.dependencies += [ComponentDependency("template-forky")]
+#                template_content_dir = str(
+#                    self.executor.get_sources_dir() / "template-forky"
+#                )
+#                self.environment.update(
+#                    {
+#                        "APPMENUS_DIR": template_content_dir,
+#                        "FLAVORS_DIR": template_content_dir,
+#                    }
+#                )
+#                template_flavor_dir += [
+#                    f"+kali:{self.executor.get_sources_dir()}/template-forky",
+#                    f"+kali-core:{self.executor.get_sources_dir()}/template-forky",
+#                    f"+kali-large:{self.executor.get_sources_dir()}/template-forky",
+#                    f"+kali-everything:{self.executor.get_sources_dir()}/template-forky",
+#                ]
 
         elif self.template.distribution.is_archlinux():
             self.dependencies += [
