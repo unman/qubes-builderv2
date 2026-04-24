@@ -22,7 +22,7 @@ case ${DISTRIBUTION} in
         DIST_VENDOR=ubuntu
         MIRRORSITE=http://archive.ubuntu.com/ubuntu
         ;;
-    jammy|noble)
+    jammy|noble|resolute)
         DIST_VENDOR=ubuntu
         MIRRORSITE=https://fr.archive.ubuntu.com/ubuntu
         ;;
@@ -64,7 +64,7 @@ case ${DISTRIBUTION} in
     buster|bullseye|bookworm|trixie|sid|experimental)
         COMPONENTS="main"
         ;;
-    bionic|focal|jammy|noble)
+    bionic|focal|jammy|noble|resolute)
         COMPONENTS="main restricted universe multiverse"
         ;;
 esac

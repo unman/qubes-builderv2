@@ -47,7 +47,7 @@ if [ "${fullname}" == "debian" ]; then
     dists=(buster bullseye bookworm trixie forky)
 elif [ "${fullname}" == "ubuntu" ]; then
     name="Ubuntu"
-    dists=(bionic focal jammy lunar noble)
+    dists=(bionic focal jammy lunar noble resolute)
 else
     echo "Unsupported distribution."
     exit 1
