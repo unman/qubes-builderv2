@@ -6,6 +6,13 @@ include:
   - file: /common.yml
     project: QubesOS/qubes-continuous-integration
 
+workflow:
+  rules:
+    - if: $CI_COMMIT_BRANCH =~ /^test(-.*)?$/
+      variables:
+        CI_RUN_ALL_JOBS: "1"
+    - when: always
+
 stages:
   - test
   - prep
@@ -15,18 +22,30 @@ variables:
   DEBUG: "1"
   GIT_SUBMODULE_STRATEGY: recursive
   CI_RUN_PYTEST_JOBS:
+    value: "1"
     description: "Run all pytest jobs, default: 1"
   CI_RUN_COMPONENT_JOBS:
+    value: "0"
     description: "Run components jobs, default: 0"
   CI_RUN_TEMPLATE_JOBS:
+    value: "0"
     description: "Run template jobs, default: 0"
   CI_RUN_CACHE_JOBS:
+    value: "0"
     description: "Run cache jobs, subset of CI_RUN_COMPONENT_JOBS, default: 0"
   CI_RUN_ISO_JOBS:
+    value: "0"
     description: "Run ISO jobs, default: 0"
   CI_RUN_INFRA_JOBS:
+    value: "0"
     description: "Run all builderv2-github jobs, default: 0"
+  CI_RUN_WINDOWS_JOBS:
+    value: "0"
+    description: "Run Windows build jobs, default: 0"
+  CI_RUN_ANSIBLE_JOBS:
+    description: "Run Ansible deployment tests, default: 0"
   CI_RUN_ALL_JOBS:
+    value: "0"
     description: "Run all jobs, default: 0"
 
 builderv2-github:
@@ -66,7 +85,7 @@ builderv2-github:
     PYTEST_ARGS: >-
       -vv --color=yes --showlocals
       --tb=long
-      --show-capture=all
+      --capture=no
       -rA
       -o truncation_limit_chars=0
       -o truncation_limit_lines=0
@@ -209,6 +228,30 @@ builderv2-github:
     - rm -rf artifacts/cache
     - tree artifacts
 
+.windows_build_job:
+  rules:
+    - if: $CI_RUN_WINDOWS_JOBS == "1" || $CI_RUN_ALL_JOBS == "1"
+      when: always
+    - when: never
+  stage: build
+  tags:
+    - qubes-windows
+  artifacts:
+    paths:
+      - artifacts
+    when: always
+  before_script:
+    - cp -Tr tests/gnupg ~/.gnupg
+    - chmod 700 ~/.gnupg
+    - sudo dnf install -y python3-debian dpkg-dev openssl tree
+  script:
+    - ./qb --builder-conf tests/builder-ci.yml -d "${CI_JOB_NAME#qubes-}" --option executor:type=qubes --option executor:options:dispvm=builder-dvm ${QB_EXTRA_ARGS} package fetch init-cache prep
+    - ./qb --builder-conf tests/builder-ci.yml -d "${CI_JOB_NAME#qubes-}" ${QB_EXTRA_ARGS} package build
+    - ./qb --builder-conf tests/builder-ci.yml -d "${CI_JOB_NAME#qubes-}" --option executor:type=qubes --option executor:options:dispvm=builder-dvm ${QB_EXTRA_ARGS} package sign publish
+  after_script:
+    - rm -rf artifacts/cache
+    - tree artifacts
+
 .template_qubes_job:
   rules:
     - if: $CI_RUN_TEMPLATE_JOBS == "1" || $CI_RUN_ALL_JOBS == "1"
@@ -292,7 +335,7 @@ pytest:
   tags:
     - qubes
   variables:
-    PYTEST_TARGETS: "tests/test_executors.py tests/test_functions.py tests/test_objects.py tests/test_scripts.py tests/test_log.py"
+    PYTEST_TARGETS: "tests/test_executors.py tests/test_functions.py tests/test_objects.py tests/test_scripts.py tests/test_log.py tests/test_plugins.py"
 
 pytest-cli-cleanup:
   extends: .pytest
@@ -349,6 +392,57 @@ pytest-cli-installer-cache:
   variables:
     PYTEST_TARGETS: "tests/test_cli.py -k test_installer_init_cache"
 
+pytest-check-release-status:
+  extends: .pytest
+  variables:
+    PYTEST_TARGETS: "tests/test_check_release_status.py"
+
+pytest-windows:
+  extends: .pytest
+  variables:
+    PYTEST_TARGETS: "tests/test_windows.py"
+
+.ansible-deploy:
+  rules:
+    - if: $CI_RUN_ANSIBLE_JOBS == "1" || $CI_RUN_ALL_JOBS == "1"
+      when: always
+    - when: never
+  stage: test
+  tags:
+    - vm-kvm
+  before_script:
+    # Install Ansible and the Qubes dom0 modules
+    - sudo qubes-dom0-update -y ansible qubes-ansible-dom0
+    # Install the Qubes Ansible connection plugin in the management VM template
+    - sudo qvm-run --pass-io -u root "$(qvm-prefs default-mgmt-dvm template)" "dnf install -y qubes-ansible qubes-ansible-vm"
+    - sudo qvm-shutdown --wait "$(qvm-prefs default-mgmt-dvm template)"
+  script:
+    - cd ansible
+    - ansible-playbook playbooks/main.yml
+        -e builder_qube_names=ci-work-qubesos
+        -e builder_dvm_name=ci-builder-dvm
+        -e "builder_git_version=$(git tag --sort=-creatordate | grep '^mm_' | head -1)"
+    # dom0: list created qubes and check key properties
+    - qvm-ls
+    - qvm-prefs ci-builder-dvm template_for_dispvms
+    - qvm-prefs ci-work-qubesos default_dispvm
+    # dom0: RPC policy
+    - cat /etc/qubes/policy.d/50-qubesbuilder.policy
+    # ci-builder-dvm: bind-dirs and rc.local
+    - qvm-run --pass-io ci-builder-dvm "cat /rw/config/qubes-bind-dirs.d/builder.conf"
+    - qvm-run --pass-io ci-builder-dvm "cat /rw/config/rc.local"
+    # ci-builder-dvm: RPC services
+    - qvm-run --pass-io ci-builder-dvm "cat /usr/local/etc/qubes-rpc/qubesbuilder.FileCopyIn"
+    - qvm-run --pass-io ci-builder-dvm "cat /usr/local/etc/qubes-rpc/qubesbuilder.FileCopyOut"
+    # ci-work-qubesos: repository clone and submodules
+    - qvm-run --pass-io ci-work-qubesos "ls ~/qubes-builderv2"
+    - qvm-run --pass-io ci-work-qubesos "git -C ~/qubes-builderv2 submodule status"
+
+r4.3:ansible-deploy:
+  extends: .ansible-deploy
+  variables:
+    VM_IMAGE: qubes_4.3_64bit_stable.qcow2
+
 #
 # Components
 #
@@ -368,9 +462,6 @@ cache-host-fc41:
   script:
     - !reference [.init_cache_job, script ]
     - tests/scripts/check-chroot-content.sh artifacts "${CI_JOB_NAME#cache-}" /usr/bin/gcc
-
-cache-vm-fc40:
-  extends: .init_cache_job
 
 cache-vm-fc41:
   extends: .init_cache_job
@@ -409,10 +500,10 @@ podman-host-fc37:
   needs:
     - cache-host-fc37
 
-podman-vm-fc40:
+podman-vm-fc43:
   extends: .component_podman_job
   needs:
-    - cache-vm-fc40
+    - cache-vm-fc43
 
 #podman-vm-bookworm:
 #  extends: .component_podman_job
@@ -424,10 +515,10 @@ docker-host-fc37:
   needs:
     - cache-host-fc37
 
-docker-vm-fc40:
+docker-vm-fc43:
   extends: .component_docker_job
   needs:
-    - cache-vm-fc40
+    - cache-vm-fc43
 
 docker-vm-bookworm:
   extends: .component_docker_job
@@ -451,7 +542,7 @@ docker-vm-jammy:
     # install an update manually built until https://bugzilla.redhat.com/show_bug.cgi?id=2108872 is handled
     - sudo dnf update -y https://salmon.qubes-os.org/~marmarek/reprepro-5.4.2-1.fc37.x86_64.rpm
   variables:
-    QB_EXTRA_ARGS: "-o executor:options:image=qubes-builder-debian:latest -o +components+vmm-xen-guest -c vmm-xen-guest -c core-vchan-xen"
+    QB_EXTRA_ARGS: "-o executor:options:image=qubes-builder-debian:latest"
   needs:
     - cache-vm-jammy
 
@@ -467,7 +558,7 @@ docker-vm-noble:
     # install an update manually built until https://bugzilla.redhat.com/show_bug.cgi?id=2108872 is handled
     - sudo dnf update -y https://salmon.qubes-os.org/~marmarek/reprepro-5.4.2-1.fc37.x86_64.rpm
   variables:
-    QB_EXTRA_ARGS: "-o executor:options:image=qubes-builder-ubuntu:latest -o +components+vmm-xen-guest -c vmm-xen-guest -c core-vchan-xen"
+    QB_EXTRA_ARGS: "-o executor:options:image=qubes-builder-ubuntu:latest"
   needs:
     - cache-vm-noble
 
@@ -478,15 +569,20 @@ qubes-host-fc37:
   needs:
     - cache-host-fc37
 
-qubes-vm-fc40:
+qubes-vm-fc43:
   extends: .component_qubes_job
   needs:
-    - cache-vm-fc40
+    - cache-vm-fc43
 
 qubes-vm-bookworm:
   extends: .component_qubes_job
   needs:
     - cache-vm-bookworm
+
+qubes-vm-win10:
+  extends: .windows_build_job
+  variables:
+    QB_EXTRA_ARGS: "-c example-advanced"
 
 # Local executor
 
@@ -495,10 +591,10 @@ local-host-fc37:
   needs:
     - cache-host-fc37
 
-local-vm-fc40:
+local-vm-fc43:
   extends: .component_local_job
   needs:
-    - cache-vm-fc40
+    - cache-vm-fc43
 
 local-vm-bookworm:
   extends: .component_local_job
@@ -509,7 +605,7 @@ local-vm-bookworm:
 # Templates
 #
 
-qubes-template-fedora-40-xfce:
+qubes-template-fedora-43-xfce:
   extends: .template_qubes_job
 
 qubes-template-debian-12:
