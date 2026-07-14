@@ -20,7 +20,6 @@
 from qubesbuilder.config import Config
 from qubesbuilder.distribution import QubesDistribution
 from qubesbuilder.executors import ExecutorError
-from qubesbuilder.plugins import ArchlinuxDistributionPlugin
 from qubesbuilder.plugins.chroot import ChrootError, ChrootPlugin
 
 
@@ -79,6 +78,8 @@ def get_archchroot_cmd(
         "sudo rm -rf /etc/pacman.d/gnupg/private-keys-v1.d/*",
         "sudo pacman-key --init",
         "sudo pacman-key --populate",
+        "(sudo pacman-key --refresh-keys || :)",
+        "sudo pacman-key --updatedb",
         f"sudo mkdir -p {chroot_dir.parent}",
         " ".join(mkarchchroot_cmd),
     ]
@@ -86,12 +87,13 @@ def get_archchroot_cmd(
     return cmd
 
 
-class ArchlinuxChrootPlugin(ArchlinuxDistributionPlugin, ChrootPlugin):
+class ArchlinuxChrootPlugin(ChrootPlugin):
+    dist_filter = staticmethod(lambda d: d.is_archlinux())
     """
     ArchlinuxChrootPlugin manages Archlinux chroot creation
 
     Stages:
-        - chroot - Create Archlinux cache chroot.
+        - init-cache - Create Archlinux cache chroot.
     """
 
     name = "chroot_archlinux"
@@ -106,29 +108,33 @@ class ArchlinuxChrootPlugin(ArchlinuxDistributionPlugin, ChrootPlugin):
     ):
         super().__init__(dist=dist, config=config, stage=stage, **kwargs)
 
-    def run(self, force: bool = False):
+    def run(self, force: bool = False, **kwargs):
         """
         Run plugin for given stage.
         """
 
-        cache_chroot_dir = (
-            self.config.cache_dir / "chroot" / self.dist.distribution
-        )
-        chroot_name = "root"
-        chroot_archive = f"{chroot_name}.tar.gz"
+        chroot_dir = self.config.cache_dir / "chroot" / self.dist.distribution
+        chroot_archive = f"root.tar.gz"
 
         artifacts_info = self.get_artifacts_info(
             stage=self.stage,
-            basename=chroot_name,
-            artifacts_dir=cache_chroot_dir,
+            basename=self.dist.nva,
+            artifacts_dir=chroot_dir / self.dist.nva,
         )
 
         existing_packages = artifacts_info.get("packages", [])
 
-        additional_packages = (
-            self.config.get("cache", {})
-            .get(self.dist.distribution, {})
-            .get("packages", [])
+        cache_dist_conf = self.config.get("cache", {}).get(
+            self.dist.distribution, {}
+        )
+        additional_packages = cache_dist_conf.get("packages", [])
+        # Arch always installs into the chroot; the flag is recorded for
+        # symmetry with RPM/DEB and to invalidate cache on toggle.
+        install_into_chroot = bool(
+            cache_dist_conf.get("install-packages", False)
+        )
+        existing_install_into_chroot = bool(
+            artifacts_info.get("install-packages", False)
         )
 
         # Delete previous chroot if forced or package sets differ
@@ -140,6 +146,12 @@ class ArchlinuxChrootPlugin(ArchlinuxDistributionPlugin, ChrootPlugin):
                 msg = (
                     f"{self.dist}: Existing packages in cache differ from requested ones. "
                     f"Recreating cache..."
+                )
+                recreate = True
+            elif install_into_chroot != existing_install_into_chroot:
+                msg = (
+                    f"{self.dist}: install-packages flag toggled; "
+                    f"recreating cache..."
                 )
                 recreate = True
             else:
@@ -154,10 +166,12 @@ class ArchlinuxChrootPlugin(ArchlinuxDistributionPlugin, ChrootPlugin):
             if not recreate:
                 return
 
-            (cache_chroot_dir / chroot_archive).unlink()
+            (chroot_dir / self.dist.nva / chroot_archive).unlink(
+                missing_ok=True
+            )
 
         # Create chroot cache dir
-        cache_chroot_dir.mkdir(exist_ok=True, parents=True)
+        (chroot_dir / self.dist.nva).mkdir(exist_ok=True, parents=True)
 
         copy_in = self.default_copy_in(
             self.executor.get_plugins_dir(), self.executor.get_sources_dir()
@@ -171,7 +185,7 @@ class ArchlinuxChrootPlugin(ArchlinuxDistributionPlugin, ChrootPlugin):
         copy_out = [
             (
                 self.executor.get_cache_dir() / chroot_archive,
-                cache_chroot_dir,
+                chroot_dir / self.dist.nva,
             )
         ]
 
@@ -194,10 +208,10 @@ class ArchlinuxChrootPlugin(ArchlinuxDistributionPlugin, ChrootPlugin):
             servers=servers,
         )
 
-        chroot_dir = self.executor.get_cache_dir() / chroot_name
+        executor_chroot_dir = self.executor.get_cache_dir() / "root"
 
         cmd = pacman_cmd + get_archchroot_cmd(
-            chroot_dir,
+            executor_chroot_dir,
             pacman_conf,
             makepkg_conf,
             additional_packages=additional_packages,
@@ -205,7 +219,7 @@ class ArchlinuxChrootPlugin(ArchlinuxDistributionPlugin, ChrootPlugin):
 
         cmd += [
             f"cd {self.executor.get_cache_dir()}",
-            f"sudo tar cf {chroot_archive} {chroot_name}",
+            f"sudo tar cf {chroot_archive} root",
         ]
 
         try:
@@ -222,12 +236,13 @@ class ArchlinuxChrootPlugin(ArchlinuxDistributionPlugin, ChrootPlugin):
         # Save packages info into artifacts file
         info = {
             "packages": additional_packages,
+            "install-packages": install_into_chroot,
         }
         self.save_artifacts_info(
             stage=self.stage,
-            basename=chroot_name,
+            basename=self.dist.nva,
             info=info,
-            artifacts_dir=cache_chroot_dir,
+            artifacts_dir=chroot_dir / self.dist.nva,
         )
 
 

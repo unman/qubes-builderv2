@@ -25,17 +25,20 @@ from typing import List, Dict, Any
 
 import click
 
-from qubesbuilder.cli.cli_base import ContextObj, aliased_group
+from qubesbuilder.cli.cli_base import ContextObj, AliasedGroup, aliased_group
 from qubesbuilder.cli.cli_cleanup import cleanup
 from qubesbuilder.cli.cli_config import config
 from qubesbuilder.cli.cli_exc import CliError
 from qubesbuilder.cli.cli_installer import installer
+from qubesbuilder.cli.cli_list_deps import list_deps
 from qubesbuilder.cli.cli_package import package
 from qubesbuilder.cli.cli_repository import repository
+from qubesbuilder.cli.cli_self import self_group
 from qubesbuilder.cli.cli_template import template
 from qubesbuilder.common import STAGES, str_to_bool
 from qubesbuilder.config import Config, deep_merge
 from qubesbuilder.log import init_logger
+from qubesbuilder.self_upgrade import notify_if_update_available
 
 ALLOWED_KEY_PATTERN = r"[A-Za-z0-9_+-]+"
 
@@ -125,6 +128,8 @@ def parse_dict_from_cli(s, value=None, append=False):
 
             if value.lower() in ("true", "false", "1", "0"):
                 value = str_to_bool(value)
+            elif value in ("", "{}"):
+                value = {}
 
             if append:
                 value = [value]
@@ -238,12 +243,21 @@ def main(
     obj.templates = obj.config.get_templates(template)
 
     # debug will show traceback
-    ctx.command.debug = obj.config.debug
+    if isinstance(ctx.command, AliasedGroup):
+        ctx.command.debug = obj.config.debug
 
     ctx.obj = obj
 
+    # Define a config session based on click context object
+    obj.config.set("session", obj)
+
     # init QubesBuilderLogger
     init_logger(verbose=obj.config.verbose, log_file=log_file)
+
+    # Throttled update notice, build subcommands only (keeps query output clean).
+    # Run it on close so it prints at the end, after the build output.
+    if ctx.invoked_subcommand in ("package", "template", "installer"):
+        ctx.call_on_close(lambda: notify_if_update_available(obj.config))
 
 
 main.epilog = f"""Stages:
@@ -280,3 +294,5 @@ main.add_command(repository)
 main.add_command(installer)
 main.add_command(config)
 main.add_command(cleanup)
+main.add_command(list_deps)
+main.add_command(self_group, name="self")

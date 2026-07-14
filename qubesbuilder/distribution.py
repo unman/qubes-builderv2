@@ -30,6 +30,7 @@ DEBIAN = {
     "bullseye": "11",
     "bookworm": "12",
     "trixie": "13",
+    "forky": "14",
 }
 
 # LTS
@@ -115,7 +116,7 @@ class QubesDistribution:
             raise DistributionError(
                 f"Unsupported distribution '{self.distribution}'."
             )
-
+        self.nva = f"{self.fullname}-{self.version}-{self.architecture}"
         self.kwargs = kwargs or {}
 
     def to_str(self) -> str:

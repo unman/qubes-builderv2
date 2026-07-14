@@ -13,13 +13,19 @@ git:
 backend-vmm: xen
 debug: true
 verbose: true
-qubes-release: r4.3
+qubes-release: devel
+
+self-upgrade:
+  url: https://github.com/QubesOS/qubes-builderv2
+  branch: main
 
 distributions:
   - host-fc41
   - vm-bookworm
   - vm-trixie
   - vm-fc42
+  - vm-fc43
+  - vm-fc44
 
 templates:
   - fedora-42-xfce:
@@ -88,12 +94,15 @@ components:
       branch: main
   - linux-firmware
   - linux-kernel:
-      branch: stable-6.12
+      branch: stable-6.18
       timeout: 21600
   - linux-kernel-latest:
       url: https://github.com/QubesOS/qubes-linux-kernel
       branch: main
       timeout: 21600
+  - vmm-xen-unified:
+      # requires extra setup for signing, disable by default
+      packages: false
   - artwork
   - grub2
   - grub2-theme
@@ -106,6 +115,8 @@ components:
   - app-linux-split-gpg:
       branch: main
   - app-linux-split-gpg2:
+      branch: main
+  - app-linux-split-ssh:
       branch: main
   - app-linux-gpg-sign:
       branch: main
@@ -126,8 +137,7 @@ components:
       branch: main
   - app-u2f:
       branch: main
-  - video-companion:
-      branch: main
+  - video-companion
   - notification-proxy
   - screenshot-helper
   - python-looseversion
@@ -168,12 +178,14 @@ components:
   - dummy-backlight
   - zfs
   - zfs-dkms
+  - xorg-x11-server
   - linux-pvgrub2
   - linux-gbulb:
       branch: main
   - linux-scrypt
   - qubes-release
   - dist-upgrade
+  - pykickstart
   - blivet
   - lorax-templates
   - anaconda

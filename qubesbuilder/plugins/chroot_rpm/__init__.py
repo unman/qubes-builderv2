@@ -22,16 +22,16 @@ from qubesbuilder.config import Config
 from qubesbuilder.distribution import QubesDistribution
 from qubesbuilder.executors import ExecutorError
 from qubesbuilder.executors.container import ContainerExecutor
-from qubesbuilder.plugins import RPMDistributionPlugin
 from qubesbuilder.plugins.chroot import ChrootError, ChrootPlugin
 
 
-class RPMChrootPlugin(RPMDistributionPlugin, ChrootPlugin):
+class RPMChrootPlugin(ChrootPlugin):
+    dist_filter = staticmethod(lambda d: d.is_rpm())
     """
     ChrootPlugin manages RPM chroot creation
 
     Stages:
-        - chroot - Create Mock cache chroot.
+        - init-cache - Create Mock cache chroot.
     """
 
     name = "chroot_rpm"
@@ -46,32 +46,33 @@ class RPMChrootPlugin(RPMDistributionPlugin, ChrootPlugin):
     ):
         super().__init__(dist=dist, config=config, stage=stage, **kwargs)
 
-    def run(self, force=False):
+    def run(self, force=False, **kwargs):
         """
         Run plugin for given stage.
         """
 
-        mock_conf = f"{self.dist.fullname}-{self.dist.version}-{self.dist.architecture}.cfg"
+        mock_conf = f"{self.dist.nva}.cfg"
 
-        chroot_dir = (
-            self.config.cache_dir / "chroot" / self.dist.distribution / "mock"
-        )
-
-        # FIXME: Parse from mock cfg?
-        mock_chroot_name = mock_conf.replace(".cfg", "")
+        chroot_dir = self.config.cache_dir / "chroot" / self.dist.distribution
 
         artifacts_info = self.get_artifacts_info(
             stage=self.stage,
-            basename=mock_chroot_name,
-            artifacts_dir=chroot_dir / mock_chroot_name,
+            basename=self.dist.nva,
+            artifacts_dir=chroot_dir / self.dist.nva,
         )
 
         existing_packages = artifacts_info.get("packages", [])
 
-        additional_packages = (
-            self.config.get("cache", {})
-            .get(self.dist.distribution, {})
-            .get("packages", [])
+        cache_dist_conf = self.config.get("cache", {}).get(
+            self.dist.distribution, {}
+        )
+        additional_packages = cache_dist_conf.get("packages", [])
+        # True: install into the chroot; False: download to dnf_cache only.
+        install_into_chroot = bool(
+            cache_dist_conf.get("install-packages", False)
+        )
+        existing_install_into_chroot = bool(
+            artifacts_info.get("install-packages", False)
         )
 
         # Delete previous chroot if forced to do it or if packages set differs
@@ -82,6 +83,9 @@ class RPMChrootPlugin(RPMDistributionPlugin, ChrootPlugin):
             elif set(additional_packages) != set(existing_packages):
                 msg = f"{self.dist}: Existing packages in cache differs from requested ones. Recreating cache..."
                 recreate = True
+            elif install_into_chroot != existing_install_into_chroot:
+                msg = f"{self.dist}: install-packages flag toggled; recreating cache..."
+                recreate = True
             else:
                 msg = f"{self.dist}: Re-using existing cache. Use --force to force cleanup and recreation."
                 recreate = False
@@ -91,7 +95,7 @@ class RPMChrootPlugin(RPMDistributionPlugin, ChrootPlugin):
             if not recreate:
                 return
 
-            shutil.rmtree(chroot_dir / mock_chroot_name)
+            shutil.rmtree(chroot_dir / self.dist.nva)
 
         # Create chroot cache dir
         chroot_dir.mkdir(exist_ok=True, parents=True)
@@ -131,7 +135,7 @@ class RPMChrootPlugin(RPMDistributionPlugin, ChrootPlugin):
         )
         copy_out = [
             (
-                self.executor.get_cache_dir() / f"mock/{mock_chroot_name}",
+                self.executor.get_cache_dir() / f"mock/{self.dist.nva}",
                 chroot_dir,
             )
         ]
@@ -151,26 +155,60 @@ class RPMChrootPlugin(RPMDistributionPlugin, ChrootPlugin):
         # Create a second cage for downloading the packages
         if additional_packages:
             # Remove dnf_cache
-            if (chroot_dir / mock_chroot_name / "dnf_cache").exists():
-                shutil.rmtree(chroot_dir / mock_chroot_name / "dnf_cache")
+            if (chroot_dir / self.dist.nva / "dnf_cache").exists():
+                shutil.rmtree(chroot_dir / self.dist.nva / "dnf_cache")
             copy_in = self.default_copy_in(
                 self.executor.get_plugins_dir(), self.executor.get_sources_dir()
             ) + [
                 (
-                    chroot_dir / mock_chroot_name,
+                    chroot_dir / self.dist.nva,
                     self.executor.get_cache_dir() / f"mock",
                 ),
             ]
-            copy_out = [
-                (
-                    self.executor.get_cache_dir()
-                    / f"mock/{mock_chroot_name}/dnf_cache",
-                    chroot_dir / mock_chroot_name,
-                )
-            ]
+            if install_into_chroot:
+                # Persist root + dnf_cache so future --no-clean builds start with packages installed.
+                copy_out = [
+                    (
+                        self.executor.get_cache_dir() / f"mock/{self.dist.nva}",
+                        chroot_dir,
+                    )
+                ]
+            else:
+                copy_out = [
+                    (
+                        self.executor.get_cache_dir()
+                        / f"mock/{self.dist.nva}/dnf_cache",
+                        chroot_dir / self.dist.nva,
+                    )
+                ]
             for package in additional_packages:
                 mock_cmd += ["--install", f"'{package}'"]
             cmd.append(" ".join(mock_cmd))
+            if install_into_chroot:
+                # mock's root_cache snapshot is taken at --init time and not
+                # updated by --install. Re-tar the live root into
+                # root_cache_install/cache.tar.gz so build_rpm can restore the
+                # post-install state, while root_cache/ remains the minimal init
+                # cache used by source_rpm (which does not need pre-installed deps).
+                build_root = f"/builder/build/{self.dist.nva}/root"
+                cache_root_cache_install = (
+                    self.executor.get_cache_dir()
+                    / f"mock/{self.dist.nva}/root_cache_install"
+                )
+                cmd.append(f"sudo mkdir -p {cache_root_cache_install}")
+                cmd.append(
+                    f"sudo rm -f {cache_root_cache_install}/cache.tar.gz "
+                    f"{cache_root_cache_install}/cache.tar"
+                )
+                cmd.append(
+                    f"sudo tar -C {build_root} -czf "
+                    f"{cache_root_cache_install}/cache.tar.gz ."
+                )
+                # chown so docker cp back to host does not fail on root-owned files.
+                cmd.append(
+                    f"sudo chown {self.executor.get_user()}:{self.executor.get_group()} "
+                    f"{cache_root_cache_install}/cache.tar.gz"
+                )
             try:
                 self.executor.run(
                     cmd,
@@ -188,12 +226,13 @@ class RPMChrootPlugin(RPMDistributionPlugin, ChrootPlugin):
         # Save packages info into artifacts file
         info = {
             "packages": additional_packages,
+            "install-packages": install_into_chroot,
         }
         self.save_artifacts_info(
             stage=self.stage,
-            basename=mock_chroot_name,
+            basename=self.dist.nva,
             info=info,
-            artifacts_dir=chroot_dir / mock_chroot_name,
+            artifacts_dir=chroot_dir / self.dist.nva,
         )
 
 

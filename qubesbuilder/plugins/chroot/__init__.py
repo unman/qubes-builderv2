@@ -17,10 +17,10 @@
 #
 # SPDX-License-Identifier: GPL-3.0-or-later
 
-from qubesbuilder.config import Config
 from qubesbuilder.distribution import QubesDistribution
 from qubesbuilder.plugins import (
-    DistributionPlugin,
+    Plugin,
+    PluginContext,
     PluginError,
 )
 
@@ -29,14 +29,11 @@ class ChrootError(PluginError):
     pass
 
 
-class ChrootPlugin(DistributionPlugin):
+class ChrootPlugin(Plugin):
+    context = PluginContext.DIST
+    dist: QubesDistribution
     """
     ChrootPlugin manages generic chroot creation
     """
 
     name = "chroot"
-
-    def __init__(
-        self, dist: QubesDistribution, config: Config, stage: str, **kwargs
-    ):
-        super().__init__(dist=dist, config=config, stage=stage, **kwargs)

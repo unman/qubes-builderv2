@@ -17,8 +17,7 @@ HASH_RE = re.compile(r"[a-f0-9]{40}")
 
 class RandomData:
     COMPONENTS = [
-        "core-qrexec",
-        "core-vchan-xen",
+        "example-advanced",
     ]
     VERSIONS = ["1.0", "1.1", "1.2", "1.3"]
     DISTFILES = [f"distfile{i}.tar.gz" for i in range(1, 3)]
@@ -161,6 +160,7 @@ def artifacts_dir():
 
 def qb_call(builder_conf, artifacts_dir, *args, **kwargs):
     cmd = [
+        "python3",
         str(PROJECT_PATH / "qb"),
         "--verbose",
         "--builder-conf",
@@ -174,6 +174,7 @@ def qb_call(builder_conf, artifacts_dir, *args, **kwargs):
 
 def qb_call_output(builder_conf, artifacts_dir, *args, **kwargs):
     cmd = [
+        "python3",
         str(PROJECT_PATH / "qb"),
         "--verbose",
         "--builder-conf",
@@ -190,18 +191,20 @@ def test_cleanup_distfiles(artifacts_dir):
         DEFAULT_BUILDER_CONF,
         artifacts_dir,
         "-c",
-        "linux-gbulb",
+        "example-advanced",
         "package",
         "fetch",
     )
 
-    distfiles_dir = artifacts_dir / "distfiles" / "linux-gbulb"
+    distfiles_dir = artifacts_dir / "distfiles" / "example-advanced"
     distfiles_dir.mkdir(parents=True, exist_ok=True)
     dummy_file = distfiles_dir / "dummy.txt"
     dummy_file.write_text("dummy content")
     dummy_file2 = distfiles_dir / "dummy2.txt"
     dummy_file2.write_text("dummy content 2")
-    current_distfile = distfiles_dir / "gbulb-0.6.3.tar.gz"
+    current_distfile = (
+        distfiles_dir / "9FA64B92F95E706BF28E2CA6484010B5CDC576E2"
+    )
 
     qb_call(DEFAULT_BUILDER_CONF, artifacts_dir, "cleanup", "distfiles")
 
@@ -211,7 +214,7 @@ def test_cleanup_distfiles(artifacts_dir):
 
 
 def test_cleanup_build_artifacts(artifacts_dir):
-    components_dir = artifacts_dir / "components" / "linux-gbulb"
+    components_dir = artifacts_dir / "components" / "example-advanced"
     components_dir.mkdir(parents=True, exist_ok=True)
     for version in ["0.1.2-3", "0.4.5-6", "0.7.8-9", "1.0.0-1"]:
         old_version = components_dir / version
@@ -239,7 +242,7 @@ def test_cleanup_build_artifacts(artifacts_dir):
 
 
 def test_cleanup_build_artifacts_sequence(artifacts_dir):
-    components_dir = artifacts_dir / "components" / "linux-gbulb"
+    components_dir = artifacts_dir / "components" / "example-advanced"
     components_dir.mkdir(parents=True, exist_ok=True)
     for version in ["1.7", "1.8", "1.9", "1.10"]:
         old_version = components_dir / version
@@ -437,8 +440,150 @@ def test_cleanup_chroot_only_unused(artifacts_dir):
         assert (chroot_dir / distro).exists()
 
 
+def test_cleanup_installer_chroot_only_unused(artifacts_dir):
+    cache_dir = artifacts_dir / "cache"
+    installer_chroot = cache_dir / "installer" / "chroot" / "mock"
+    installer_chroot.mkdir(parents=True, exist_ok=True)
+
+    used = "fedora-37-x86_64"
+    unused = "fedora-99-x86_64"
+    (installer_chroot / used).mkdir(parents=True, exist_ok=True)
+    (installer_chroot / unused).mkdir(parents=True, exist_ok=True)
+
+    qb_call(
+        DEFAULT_BUILDER_CONF,
+        artifacts_dir,
+        "cleanup",
+        "cache",
+        "--installer-chroot-only-unused",
+    )
+
+    assert (installer_chroot / used).exists()
+    assert not (installer_chroot / unused).exists()
+
+
+def _write_template_rpm(directory, name):
+    path = directory / name
+    path.write_text("dummy")
+    return path
+
+
+def test_cleanup_installer_templates_only_old(artifacts_dir):
+    cache_dir = artifacts_dir / "cache"
+    templates_dir = cache_dir / "installer" / "templates"
+    templates_dir.mkdir(parents=True, exist_ok=True)
+
+    newer = _write_template_rpm(
+        templates_dir,
+        "qubes-template-fedora-43-xfce-4.2.0-202604010000.noarch.rpm",
+    )
+    older = _write_template_rpm(
+        templates_dir,
+        "qubes-template-fedora-43-xfce-4.2.0-202602010000.noarch.rpm",
+    )
+
+    qb_call(
+        DEFAULT_BUILDER_CONF,
+        artifacts_dir,
+        "--option",
+        "cache:templates+fedora-43-xfce",
+        "cleanup",
+        "cache",
+        "--installer-templates-only-old",
+    )
+
+    assert newer.exists()
+    assert not older.exists()
+
+
+def test_cleanup_installer_templates_only_unused(artifacts_dir):
+    cache_dir = artifacts_dir / "cache"
+    templates_dir = cache_dir / "installer" / "templates"
+    templates_dir.mkdir(parents=True, exist_ok=True)
+
+    active = _write_template_rpm(
+        templates_dir,
+        "qubes-template-fedora-43-xfce-4.2.0-202604010000.noarch.rpm",
+    )
+    stale = _write_template_rpm(
+        templates_dir,
+        "qubes-template-fedora-40-xfce-4.2.0-202504010000.noarch.rpm",
+    )
+
+    qb_call(
+        DEFAULT_BUILDER_CONF,
+        artifacts_dir,
+        "--option",
+        "cache:templates+fedora-43-xfce",
+        "cleanup",
+        "cache",
+        "--installer-templates-only-unused",
+    )
+
+    assert active.exists()
+    assert not stale.exists()
+
+
+def test_cleanup_all_prunes_outdated_installer(artifacts_dir):
+    (artifacts_dir / "logs").mkdir(parents=True, exist_ok=True)
+    cache_dir = artifacts_dir / "cache"
+    installer_chroot = cache_dir / "installer" / "chroot" / "mock"
+    installer_chroot.mkdir(parents=True, exist_ok=True)
+    (installer_chroot / "fedora-37-x86_64").mkdir()
+    (installer_chroot / "fedora-99-x86_64").mkdir()
+
+    templates_dir = cache_dir / "installer" / "templates"
+    templates_dir.mkdir(parents=True, exist_ok=True)
+    keep = _write_template_rpm(
+        templates_dir,
+        "qubes-template-fedora-43-xfce-4.2.0-202604010000.noarch.rpm",
+    )
+    drop_old = _write_template_rpm(
+        templates_dir,
+        "qubes-template-fedora-43-xfce-4.2.0-202602010000.noarch.rpm",
+    )
+    drop_unused = _write_template_rpm(
+        templates_dir,
+        "qubes-template-fedora-40-xfce-4.2.0-202504010000.noarch.rpm",
+    )
+
+    qb_call(
+        DEFAULT_BUILDER_CONF,
+        artifacts_dir,
+        "--option",
+        "cache:templates+fedora-43-xfce",
+        "cleanup",
+        "all",
+    )
+
+    assert (installer_chroot / "fedora-37-x86_64").exists()
+    assert not (installer_chroot / "fedora-99-x86_64").exists()
+    assert keep.exists()
+    assert not drop_old.exists()
+    assert not drop_unused.exists()
+
+
+def test_cleanup_all_no_installer_only_outdated(artifacts_dir):
+    (artifacts_dir / "logs").mkdir(parents=True, exist_ok=True)
+    cache_dir = artifacts_dir / "cache"
+    installer_chroot = cache_dir / "installer" / "chroot" / "mock"
+    installer_chroot.mkdir(parents=True, exist_ok=True)
+    stale = installer_chroot / "fedora-99-x86_64"
+    stale.mkdir()
+
+    qb_call(
+        DEFAULT_BUILDER_CONF,
+        artifacts_dir,
+        "cleanup",
+        "all",
+        "--no-installer-only-outdated",
+    )
+
+    assert stale.exists()
+
+
 def test_cleanup_distfiles_dry_run(artifacts_dir):
-    distfiles_dir = artifacts_dir / "distfiles" / "linux-gbulb"
+    distfiles_dir = artifacts_dir / "distfiles" / "example-advanced"
     distfiles_dir.mkdir(parents=True, exist_ok=True)
     dummy_file = distfiles_dir / "dummy.txt"
     dummy_file.write_text("dummy content")
@@ -451,7 +596,7 @@ def test_cleanup_distfiles_dry_run(artifacts_dir):
 
 
 def test_cleanup_build_artifacts_dry_run(artifacts_dir):
-    components_dir = artifacts_dir / "components" / "linux-gbulb"
+    components_dir = artifacts_dir / "components" / "example-advanced"
     components_dir.mkdir(parents=True, exist_ok=True)
     old_version = components_dir / "1.0.0"
     old_version.mkdir()

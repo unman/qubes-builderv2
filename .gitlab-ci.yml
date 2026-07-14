@@ -6,30 +6,51 @@ include:
   - file: /common.yml
     project: QubesOS/qubes-continuous-integration
 
+workflow:
+  rules:
+    - if: $CI_COMMIT_BRANCH =~ /^test(-.*)?$/
+      variables:
+        CI_RUN_ALL_JOBS: "1"
+    - when: always
+
 stages:
   - test
   - prep
   - build
+  - deploy
 
 variables:
   DEBUG: "1"
   GIT_SUBMODULE_STRATEGY: recursive
   CI_RUN_PYTEST_JOBS:
+    value: "1"
     description: "Run all pytest jobs, default: 1"
   CI_RUN_COMPONENT_JOBS:
+    value: "0"
     description: "Run components jobs, default: 0"
   CI_RUN_TEMPLATE_JOBS:
+    value: "0"
     description: "Run template jobs, default: 0"
   CI_RUN_CACHE_JOBS:
+    value: "0"
     description: "Run cache jobs, subset of CI_RUN_COMPONENT_JOBS, default: 0"
   CI_RUN_ISO_JOBS:
+    value: "0"
     description: "Run ISO jobs, default: 0"
   CI_RUN_INFRA_JOBS:
+    value: "0"
     description: "Run all builderv2-github jobs, default: 0"
+  CI_RUN_WINDOWS_JOBS:
+    value: "0"
+    description: "Run Windows build jobs, default: 0"
+  CI_RUN_ANSIBLE_JOBS:
+    description: "Run Ansible deployment tests, default: 0"
   CI_RUN_ALL_JOBS:
+    value: "0"
     description: "Run all jobs, default: 0"
 
 builderv2-github:
+  stage: deploy
   rules:
     - if: $CI_RUN_INFRA_JOBS == "1" || $CI_RUN_ALL_JOBS == "1"
       when: always
@@ -38,7 +59,6 @@ builderv2-github:
     CI_QUBES_BUILDER_BRANCH: $CI_COMMIT_BRANCH
   trigger:
     project: QubesOS/qubes-builderv2-github
-    strategy: depend
 
 #
 # job skeletons
@@ -55,6 +75,7 @@ builderv2-github:
   artifacts:
     paths:
       - artifacts/htmlcov/
+      - artifacts/pytest.log
     reports:
       junit: artifacts/qubesbuilder.xml
       coverage_report:
@@ -62,24 +83,49 @@ builderv2-github:
         path: artifacts/coverage.xml
   coverage: '/TOTAL.*\s(\d+)%/'
   variables:
-    PYTEST_ARGS: -v --color=yes --showlocals --cov qubesbuilder --cov-report term --cov-report html:artifacts/htmlcov --cov-report xml:artifacts/coverage.xml --junitxml=artifacts/qubesbuilder.xml
-  # https://gitlab.com/gitlab-org/gitlab/-/issues/15603
+    PYTEST_ARGS: >-
+      -vv --color=yes --showlocals
+      --tb=long
+      --capture=no
+      -rA
+      -o truncation_limit_chars=0
+      -o truncation_limit_lines=0
+      -o junit_logging=all
+      --cov qubesbuilder
+      --cov-report term
+      --cov-report html:artifacts/htmlcov
+      --cov-report xml:artifacts/coverage.xml
+      --junitxml=artifacts/qubesbuilder.xml
   before_script:
-    - sudo dnf install -y python3-pip python3-pytest-cov python3-pytest python3-pytest-mock python3-lxml python3-wheel sequoia-sqv python3-pycdlib
+    - sudo dnf install -y python3-pip python3-pytest-cov python3-pytest python3-pytest-mock python3-lxml python3-wheel sequoia-sqv sequoia-sq python3-pycdlib
     - sudo rm -rf ~/pytest-of-user/
     - docker pull registry.gitlab.com/qubesos/docker-images/qubes-builder-fedora:latest
     - docker tag registry.gitlab.com/qubesos/docker-images/qubes-builder-fedora:latest qubes-builder-fedora:latest
-    - mkdir ~/gitlab ~/tmp
+    - mkdir -p ~/gitlab ~/tmp artifacts
     - export PYTHONPATH=".:$PYTHONPATH" BASE_ARTIFACTS_DIR=~/gitlab TMPDIR=~/tmp
     - env
+  script:
+    - pytest-3 $PYTEST_ARGS $PYTEST_TARGETS 2>&1 | tee artifacts/pytest.log
+    - test ${PIPESTATUS[0]} -eq 0
   after_script:
-  - ci/codecov-wrapper -f artifacts/coverage.xml
+    - ci/codecov-wrapper -f artifacts/coverage.xml
 
 .init_cache_job:
   rules:
     - if: $CI_RUN_CACHE_JOBS == "1" || $CI_RUN_COMPONENT_JOBS == "1" || $CI_RUN_ALL_JOBS == "1" || $CI_COMMIT_BRANCH == "main"
       when: always
     - when: never
+  needs:
+    - job: pytest-cli-component
+      optional: true
+    - job: pytest-cli-component-host-fc37
+      optional: true
+    - job: pytest-cli-component-vm-bookworm
+      optional: true
+    - job: pytest-cli-component-vm-archlinux
+      optional: true
+    - job: pytest-cli-component-init-cache
+      optional: true
   stage: prep
   tags:
     - vm
@@ -189,7 +235,31 @@ builderv2-github:
     - tar xf artifacts.tar.xz
     - sudo dnf install -y python3-debian dpkg-dev openssl tree pacman
   script:
-    - ./qb --builder-conf tests/builder-ci.yml -d "${CI_JOB_NAME#local-}" --option executor:type=local --option executor:options:directory=/home/gitlab-runner/tmp ${QB_EXTRA_ARGS} package all
+    - LOCAL_TMP=$(mktemp -d ${CI_PROJECT_DIR}/tmpXXXXXX) && ./qb --builder-conf tests/builder-ci.yml -d "${CI_JOB_NAME#local-}" --option executor:type=local --option executor:options:directory=${LOCAL_TMP} ${QB_EXTRA_ARGS} package all
+  after_script:
+    - rm -rf artifacts/cache
+    - tree artifacts
+
+.windows_build_job:
+  rules:
+    - if: $CI_RUN_WINDOWS_JOBS == "1" || $CI_RUN_ALL_JOBS == "1"
+      when: always
+    - when: never
+  stage: build
+  tags:
+    - qubes-windows
+  artifacts:
+    paths:
+      - artifacts
+    when: always
+  before_script:
+    - cp -Tr tests/gnupg ~/.gnupg
+    - chmod 700 ~/.gnupg
+    - sudo dnf install -y python3-debian dpkg-dev openssl tree
+  script:
+    - ./qb --builder-conf tests/builder-ci.yml -d "${CI_JOB_NAME#qubes-}" --option executor:type=qubes --option executor:options:dispvm=builder-dvm ${QB_EXTRA_ARGS} package fetch init-cache prep
+    - ./qb --builder-conf tests/builder-ci.yml -d "${CI_JOB_NAME#qubes-}" ${QB_EXTRA_ARGS} package build
+    - ./qb --builder-conf tests/builder-ci.yml -d "${CI_JOB_NAME#qubes-}" --option executor:type=qubes --option executor:options:dispvm=builder-dvm ${QB_EXTRA_ARGS} package sign publish
   after_script:
     - rm -rf artifacts/cache
     - tree artifacts
@@ -199,9 +269,16 @@ builderv2-github:
     - if: $CI_RUN_TEMPLATE_JOBS == "1" || $CI_RUN_ALL_JOBS == "1"
       when: always
     - when: never
+  needs:
+    - job: pytest-cli-template-fedora
+      optional: true
+    - job: pytest-cli-template-debian
+      optional: true
   stage: build
   tags:
     - qubes
+  variables:
+    RELEASE: 4.3
   before_script:
     - docker pull registry.gitlab.com/qubesos/docker-images/qubes-builder-fedora:latest
     - docker tag registry.gitlab.com/qubesos/docker-images/qubes-builder-fedora:latest qubes-builder-fedora:latest
@@ -210,7 +287,7 @@ builderv2-github:
     - sudo dnf install -y python3-debian dpkg-dev openssl tree pacman
   script:
     - ./qb --builder-conf tests/builder-ci.yml -c builder-rpm -c builder-debian -c template-whonix -c template-kicksecure -c builder-archlinux -c qubes-release package fetch
-    - ./qb --builder-conf tests/builder-ci.yml -t "${CI_JOB_NAME#qubes-template-}" --option executor:type=qubes --option executor:options:dispvm=builder-dvm template all
+    - ./qb --builder-conf tests/builder-ci.yml -o use-qubes-repo:version=${RELEASE} -o qubes-release=r${RELEASE} -t "${CI_JOB_NAME#qubes-template-}" --option executor:type=qubes --option executor:options:dispvm=builder-dvm template all
 
 .installer_iso:
   rules:
@@ -274,63 +351,119 @@ pytest:
   extends: .pytest
   tags:
     - qubes
-  script:
-    - pytest-3 $PYTEST_ARGS tests/test_executors.py tests/test_functions.py tests/test_objects.py tests/test_scripts.py tests/test_log.py
+  variables:
+    PYTEST_TARGETS: "tests/test_executors.py tests/test_functions.py tests/test_objects.py tests/test_scripts.py tests/test_log.py tests/test_plugins.py tests/test_self_upgrade.py"
 
 pytest-cli-cleanup:
   extends: .pytest
-  script:
-    - pytest-3 $PYTEST_ARGS tests/test_cli_cleanup.py -k test_cleanup_
+  variables:
+    PYTEST_TARGETS: "tests/test_cli_cleanup.py -k test_cleanup_"
 
 pytest-cli-repository:
   extends: .pytest
-  script:
-    - pytest-3 $PYTEST_ARGS tests/test_cli_repository.py -k test_repository_
+  variables:
+    PYTEST_TARGETS: "tests/test_cli_repository.py -k test_repository_"
+
+pytest-cli-deps:
+  extends: .pytest
+  variables:
+    PYTEST_TARGETS: "tests/test_cli_list_deps.py"
 
 pytest-cli-component-host-fc37:
   extends: .pytest
-  script:
-    - pytest-3 $PYTEST_ARGS tests/test_cli.py -k test_component_host_fc37_
+  variables:
+    PYTEST_TARGETS: "tests/test_cli.py -k test_component_host_fc37_"
 
 pytest-cli-component-vm-bookworm:
   extends: .pytest
-  script:
-    - pytest-3 $PYTEST_ARGS tests/test_cli.py -k test_component_vm_bookworm
+  variables:
+    PYTEST_TARGETS: "tests/test_cli.py -k test_component_vm_bookworm"
 
 pytest-cli-component-vm-archlinux:
   extends: .pytest
-  script:
-    - pytest-3 $PYTEST_ARGS tests/test_cli.py -k test_component_vm_archlinux
+  variables:
+    PYTEST_TARGETS: "tests/test_cli.py -k test_component_vm_archlinux"
 
 pytest-cli-component:
   extends: .pytest
-  script:
-    - pytest-3 $PYTEST_ARGS tests/test_cli.py -k test_common_
+  variables:
+    PYTEST_TARGETS: "tests/test_cli.py -k test_common_"
 
 pytest-cli-component-init-cache:
   extends: .pytest
-  script:
-    - pytest-3 $PYTEST_ARGS tests/test_cli.py -k test_init_cache_
+  variables:
+    PYTEST_TARGETS: "tests/test_cli.py -k test_init_cache_"
 
 pytest-cli-increment-component:
   extends: .pytest
-  script:
-    - pytest-3 $PYTEST_ARGS tests/test_cli.py -k test_increment_component_
+  variables:
+    PYTEST_TARGETS: "tests/test_cli.py -k test_increment_component_"
 
 pytest-cli-template-fedora:
   extends: .pytest
-  script:
-    - pytest-3 $PYTEST_ARGS tests/test_cli.py -k test_template_fedora
+  variables:
+    PYTEST_TARGETS: "tests/test_cli.py -k test_template_fedora"
 
 pytest-cli-template-debian:
   extends: .pytest
-  script:
-    - pytest-3 $PYTEST_ARGS tests/test_cli.py -k test_template_debian
+  variables:
+    PYTEST_TARGETS: "tests/test_cli.py -k test_template_debian"
 
 pytest-cli-installer-cache:
   extends: .pytest
+  variables:
+    PYTEST_TARGETS: "tests/test_cli.py -k test_installer_init_cache"
+
+pytest-check-release-status:
+  extends: .pytest
+  variables:
+    PYTEST_TARGETS: "tests/test_check_release_status.py"
+
+pytest-windows:
+  extends: .pytest
+  variables:
+    PYTEST_TARGETS: "tests/test_windows.py"
+
+.ansible-deploy:
+  rules:
+    - if: $CI_RUN_ANSIBLE_JOBS == "1" || $CI_RUN_ALL_JOBS == "1"
+      when: always
+    - when: never
+  stage: test
+  tags:
+    - vm-kvm
+  before_script:
+    # Install Ansible and the Qubes dom0 modules
+    - sudo qubes-dom0-update -y ansible qubes-ansible-dom0
+    # Install the Qubes Ansible connection plugin in the management VM template
+    - sudo qvm-run --pass-io -u root "$(qvm-prefs default-mgmt-dvm template)" "dnf install -y qubes-ansible qubes-ansible-vm"
+    - sudo qvm-shutdown --wait "$(qvm-prefs default-mgmt-dvm template)"
   script:
-    - pytest-3 $PYTEST_ARGS tests/test_cli.py -k test_installer_init_cache
+    - cd ansible
+    - ansible-playbook playbooks/main.yml
+        -e builder_qube_names=ci-work-qubesos
+        -e builder_dvm_name=ci-builder-dvm
+        -e "builder_git_version=$(git tag --sort=-creatordate | grep '^mm_' | head -1)"
+    # dom0: list created qubes and check key properties
+    - qvm-ls
+    - qvm-prefs ci-builder-dvm template_for_dispvms
+    - qvm-prefs ci-work-qubesos default_dispvm
+    # dom0: RPC policy
+    - cat /etc/qubes/policy.d/50-qubesbuilder.policy
+    # ci-builder-dvm: bind-dirs and rc.local
+    - qvm-run --pass-io ci-builder-dvm "cat /rw/config/qubes-bind-dirs.d/builder.conf"
+    - qvm-run --pass-io ci-builder-dvm "cat /rw/config/rc.local"
+    # ci-builder-dvm: RPC services
+    - qvm-run --pass-io ci-builder-dvm "cat /usr/local/etc/qubes-rpc/qubesbuilder.FileCopyIn"
+    - qvm-run --pass-io ci-builder-dvm "cat /usr/local/etc/qubes-rpc/qubesbuilder.FileCopyOut"
+    # ci-work-qubesos: repository clone and submodules
+    - qvm-run --pass-io ci-work-qubesos "ls ~/qubes-builderv2"
+    - qvm-run --pass-io ci-work-qubesos "git -C ~/qubes-builderv2 submodule status"
+
+r4.3:ansible-deploy:
+  extends: .ansible-deploy
+  variables:
+    VM_IMAGE: qubes_4.3_64bit_stable.qcow2
 
 #
 # Components
@@ -352,9 +485,6 @@ cache-host-fc41:
     - !reference [.init_cache_job, script ]
     - tests/scripts/check-chroot-content.sh artifacts "${CI_JOB_NAME#cache-}" /usr/bin/gcc
 
-cache-vm-fc40:
-  extends: .init_cache_job
-
 cache-vm-fc41:
   extends: .init_cache_job
 
@@ -362,6 +492,9 @@ cache-vm-fc42:
   extends: .init_cache_job
 
 cache-vm-fc43:
+  extends: .init_cache_job
+
+cache-vm-fc44:
   extends: .init_cache_job
 
 cache-vm-bookworm:
@@ -389,10 +522,10 @@ podman-host-fc37:
   needs:
     - cache-host-fc37
 
-podman-vm-fc40:
+podman-vm-fc43:
   extends: .component_podman_job
   needs:
-    - cache-vm-fc40
+    - cache-vm-fc43
 
 #podman-vm-bookworm:
 #  extends: .component_podman_job
@@ -404,10 +537,10 @@ docker-host-fc37:
   needs:
     - cache-host-fc37
 
-docker-vm-fc40:
+docker-vm-fc43:
   extends: .component_docker_job
   needs:
-    - cache-vm-fc40
+    - cache-vm-fc43
 
 docker-vm-bookworm:
   extends: .component_docker_job
@@ -429,9 +562,9 @@ docker-vm-jammy:
     - tar xf artifacts.tar.xz
     - sudo dnf install -y python3-debian dpkg-dev openssl tree pacman
     # install an update manually built until https://bugzilla.redhat.com/show_bug.cgi?id=2108872 is handled
-    - sudo dnf update -y https://caviar.qubes-os.org/~marmarek/reprepro-5.4.2-1.fc37.x86_64.rpm
+    - sudo dnf update -y https://salmon.qubes-os.org/~marmarek/reprepro-5.4.2-1.fc37.x86_64.rpm
   variables:
-    QB_EXTRA_ARGS: "-o executor:options:image=qubes-builder-debian:latest -o +components+vmm-xen-guest -c vmm-xen-guest -c core-vchan-xen"
+    QB_EXTRA_ARGS: "-o executor:options:image=qubes-builder-debian:latest"
   needs:
     - cache-vm-jammy
 
@@ -445,9 +578,9 @@ docker-vm-noble:
     - tar xf artifacts.tar.xz
     - sudo dnf install -y python3-debian dpkg-dev openssl tree pacman
     # install an update manually built until https://bugzilla.redhat.com/show_bug.cgi?id=2108872 is handled
-    - sudo dnf update -y https://caviar.qubes-os.org/~marmarek/reprepro-5.4.2-1.fc37.x86_64.rpm
+    - sudo dnf update -y https://salmon.qubes-os.org/~marmarek/reprepro-5.4.2-1.fc37.x86_64.rpm
   variables:
-    QB_EXTRA_ARGS: "-o executor:options:image=qubes-builder-ubuntu:latest -o +components+vmm-xen-guest -c vmm-xen-guest -c core-vchan-xen"
+    QB_EXTRA_ARGS: "-o executor:options:image=qubes-builder-ubuntu:latest"
   needs:
     - cache-vm-noble
 
@@ -458,15 +591,20 @@ qubes-host-fc37:
   needs:
     - cache-host-fc37
 
-qubes-vm-fc40:
+qubes-vm-fc43:
   extends: .component_qubes_job
   needs:
-    - cache-vm-fc40
+    - cache-vm-fc43
 
 qubes-vm-bookworm:
   extends: .component_qubes_job
   needs:
     - cache-vm-bookworm
+
+qubes-vm-win10:
+  extends: .windows_build_job
+  variables:
+    QB_EXTRA_ARGS: "-c example-advanced"
 
 # Local executor
 
@@ -475,10 +613,10 @@ local-host-fc37:
   needs:
     - cache-host-fc37
 
-local-vm-fc40:
+local-vm-fc43:
   extends: .component_local_job
   needs:
-    - cache-vm-fc40
+    - cache-vm-fc43
 
 local-vm-bookworm:
   extends: .component_local_job
@@ -489,7 +627,7 @@ local-vm-bookworm:
 # Templates
 #
 
-qubes-template-fedora-40-xfce:
+qubes-template-fedora-43-xfce:
   extends: .template_qubes_job
 
 qubes-template-debian-12:

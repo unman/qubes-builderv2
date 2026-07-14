@@ -28,7 +28,7 @@ from qubesbuilder.component import QubesComponent
 from qubesbuilder.config import Config
 from qubesbuilder.distribution import QubesDistribution
 from qubesbuilder.executors import ExecutorError
-from qubesbuilder.plugins import DEBDistributionPlugin, PluginDependency
+from qubesbuilder.plugins import PluginDependency, JobDependency, JobReference
 from qubesbuilder.plugins.build import BuildPlugin, BuildError
 
 
@@ -82,7 +82,8 @@ def provision_local_repository(
         raise BuildError(msg) from e
 
 
-class DEBBuildPlugin(DEBDistributionPlugin, BuildPlugin):
+class DEBBuildPlugin(BuildPlugin):
+    dist_filter = staticmethod(lambda d: d.is_deb() or d.is_ubuntu())
     """
     DEBBuildPlugin manages Debian distribution build.
 
@@ -114,9 +115,18 @@ class DEBBuildPlugin(DEBDistributionPlugin, BuildPlugin):
         self.dependencies += [
             PluginDependency("chroot_deb"),
             PluginDependency("build"),
+            JobDependency(
+                JobReference(
+                    component=None,
+                    dist=self.dist,
+                    template=None,
+                    stage="init-cache",
+                    build=None,
+                )
+            ),
         ]
 
-    def run(self):
+    def run(self, **kwargs):
         """
         Run plugin for given stage.
         """
@@ -277,23 +287,31 @@ class DEBBuildPlugin(DEBDistributionPlugin, BuildPlugin):
 
             # Add downloaded packages and prepared chroot cache
             chroot_dir = self.config.cache_dir / "chroot" / self.dist.distribution
-            aptcache_dir = chroot_dir / "pbuilder/aptcache"
-            base_tgz = chroot_dir / "pbuilder/base.tgz"
+            pbuilder_dir = chroot_dir / self.dist.nva / "pbuilder"
+            aptcache_dir = pbuilder_dir / "aptcache"
+            base_tgz = pbuilder_dir / "base.tgz"
+            cache_dist_conf = self.config.get("cache", {}).get(
+                self.dist.distribution, {}
+            )
+            install_into_chroot = bool(
+                cache_dist_conf.get("install-packages", False)
+            )
             if aptcache_dir.exists():
                 copy_in += [(
-                    chroot_dir / "pbuilder/aptcache",
+                    pbuilder_dir / "aptcache",
                     self.executor.get_cache_dir(),
                 )]
             if base_tgz.exists():
                 copy_in += [
                     (base_tgz, self.executor.get_builder_dir() / "pbuilder")
                 ]
-                cmd += [
-                    f"sudo -E pbuilder update "
-                    f"--distribution {self.dist.name} "
-                    f"--configfile {self.executor.get_builder_dir()}/pbuilder/pbuilderrc "
-                    f"--othermirror \"{extra_sources}\""
-                ]
+                if not install_into_chroot:
+                    cmd += [
+                        f"sudo -E pbuilder update "
+                        f"--distribution {self.dist.name} "
+                        f"--configfile {self.executor.get_builder_dir()}/pbuilder/pbuilderrc "
+                        f"--othermirror \"{extra_sources}\""
+                    ]
             else:
                 cmd += [
                     f"sudo -E pbuilder create "

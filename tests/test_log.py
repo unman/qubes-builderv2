@@ -1,4 +1,6 @@
 import tempfile
+from pathlib import Path
+
 import pytest
 import logging
 from qubesbuilder.config import Config
@@ -27,7 +29,9 @@ def log_file(tmp_path):
 def config(tmp_path):
     with tempfile.NamedTemporaryFile("w", dir=tmp_path) as config_file_main:
         config_file_main.write(
-            """
+            f"""
+artifacts-dir: {tmp_path}/artifacts
+
 executor:
   type: docker
   options:
@@ -47,6 +51,22 @@ distributions:
 
 @pytest.fixture
 def plugins(config):
+    src_dir = config.sources_dir / "linux-utils"
+    src_dir.mkdir(parents=True)
+    (src_dir / ".qubesbuilder").write_text(
+        """
+host:
+  rpm:
+    build:
+    - rpm_spec/qubes-utils.spec
+vm:
+  deb:
+    build:
+    - debian
+"""
+    )
+    (src_dir / "version").write_text("1.2.3")
+    (src_dir / "rel").write_text("4")
     return config.get_jobs(
         stages=["prep"],
         components=config.get_components(),
@@ -62,13 +82,15 @@ def root_logger():
 
 def teardown_logging():
     """Reset logging configuration to default"""
-    if QubesBuilderLogger.handlers:
-        logging.shutdown()
-        import importlib
-
-        importlib.reload(logging)
-        QubesBuilderLogger.handlers = []
-        QubesBuilderLogger.filters = []
+    # Remove all child loggers created under the qb hierarchy so they don't
+    # pollute the global logger registry for subsequent test modules.
+    manager = logging.Logger.manager
+    prefix = QubesBuilderLogger.name + "."
+    stale = [k for k in list(manager.loggerDict) if k.startswith(prefix)]
+    for name in stale:
+        del manager.loggerDict[name]
+    QubesBuilderLogger.handlers.clear()
+    QubesBuilderLogger.filters.clear()
 
 
 def test_file_formatter():
@@ -128,7 +150,17 @@ def test_qb_logger_set_log_file(root_logger, log_file, plugins):
 
 
 def test_qb_logger_getChild(root_logger, plugins):
-    logger = root_logger.getChild("test_logger", plugin=plugins[0])
+    plugin = None
+    for p in plugins:
+        if (
+            getattr(p, "component", None) is not None
+            and getattr(p, "dist", None) is not None
+            and getattr(p.dist, "distribution", "") == "host-fc37"
+        ):
+            plugin = p
+            break
+    assert plugin is not None, "Could not find host-fc37 component plugin"
+    logger = root_logger.getChild("test_logger", plugin=plugin)
     child_logger = logger.getChild("child")
     assert child_logger.name == "qb.test_logger.linux-utils.host-fc37.child"
     assert child_logger.level == logger.level

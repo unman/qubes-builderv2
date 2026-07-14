@@ -25,13 +25,14 @@ from qubesbuilder.component import QubesComponent
 from qubesbuilder.config import Config
 from qubesbuilder.distribution import QubesDistribution
 from qubesbuilder.executors import ExecutorError
-from qubesbuilder.plugins import DEBDistributionPlugin, PluginDependency
+from qubesbuilder.plugins import PluginDependency
 from qubesbuilder.plugins.build import BuildError
 from qubesbuilder.plugins.build_deb import provision_local_repository
 from qubesbuilder.plugins.sign import SignPlugin, SignError
 
 
-class DEBSignPlugin(DEBDistributionPlugin, SignPlugin):
+class DEBSignPlugin(SignPlugin):
+    dist_filter = staticmethod(lambda d: d.is_deb() or d.is_ubuntu())
     """
     DEBSignPlugin manages Debian distribution sign.
 
@@ -65,7 +66,7 @@ class DEBSignPlugin(DEBDistributionPlugin, SignPlugin):
             PluginDependency("build_deb"),
         ]
 
-    def run(self):
+    def run(self, **kwargs):
         """
         Run plugin for given stage.
         """

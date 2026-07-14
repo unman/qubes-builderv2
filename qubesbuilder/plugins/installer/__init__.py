@@ -35,9 +35,11 @@ from qubesbuilder.executors.container import ContainerExecutor
 from qubesbuilder.executors.local import LocalExecutor
 from qubesbuilder.plugins import (
     PluginError,
-    DistributionPlugin,
+    Plugin,
+    PluginContext,
     PluginDependency,
-    ComponentDependency,
+    JobDependency,
+    JobReference,
 )
 from qubesbuilder.template import QubesTemplate
 
@@ -46,7 +48,10 @@ class InstallerError(PluginError):
     pass
 
 
-class InstallerPlugin(DistributionPlugin):
+class InstallerPlugin(Plugin):
+    context = PluginContext.DIST
+    dist: QubesDistribution
+    dist_filter = staticmethod(lambda d: d.is_rpm())
     """
     InstallerPlugin creates Qubes OS ISO
     """
@@ -64,9 +69,23 @@ class InstallerPlugin(DistributionPlugin):
     ):
         super().__init__(config=config, dist=dist, stage=stage, **kwargs)
 
+        installer_component = self.config.get_component("qubes-release")
+        if not installer_component:
+            raise InstallerError(
+                "Cannot find 'qubes-release' component in config."
+            )
+
         self.dependencies += [
             PluginDependency("chroot_rpm"),
-            ComponentDependency("qubes-release"),
+            JobDependency(
+                JobReference(
+                    component=installer_component,
+                    stage="fetch",
+                    build="source",
+                    dist=None,
+                    template=None,
+                )
+            ),
         ]
 
         self.iso_name = ""
@@ -212,7 +231,9 @@ class InstallerPlugin(DistributionPlugin):
                 raise PluginError(msg) from e
         return {}
 
-    def delete_artifacts_info(self, stage: str):
+    def delete_artifacts_info(
+        self, stage: str, basename: str = None, artifacts_dir=None
+    ):
         artifacts_dir = self.config.installer_dir
         info_path = (
             artifacts_dir / f"{self.dist.name}_{self.iso_name}.{stage}.yml"
@@ -250,8 +271,12 @@ class InstallerPlugin(DistributionPlugin):
         self,
         iso_timestamp: str = None,
         cache_templates_only: bool = False,
+        **kwargs,
     ):
         super().run()
+
+        if self.stage not in self.stages:
+            return
 
         self.update_parameters(stage=self.stage, iso_timestamp=iso_timestamp)
 

@@ -28,7 +28,7 @@ from qubesbuilder.config import Config
 from qubesbuilder.distribution import QubesDistribution
 from qubesbuilder.executors import ExecutorError
 from qubesbuilder.executors.local import LocalExecutor
-from qubesbuilder.plugins import ArchlinuxDistributionPlugin, PluginDependency
+from qubesbuilder.plugins import PluginDependency
 from qubesbuilder.plugins.build import BuildPlugin, BuildError
 from qubesbuilder.plugins.chroot_archlinux import (
     get_pacman_cmd,
@@ -97,7 +97,8 @@ def provision_local_repository(
         raise BuildError(msg) from e
 
 
-class ArchlinuxBuildPlugin(ArchlinuxDistributionPlugin, BuildPlugin):
+class ArchlinuxBuildPlugin(BuildPlugin):
+    dist_filter = staticmethod(lambda d: d.is_archlinux())
     """
     ArchlinuxBuildPlugin manages Archlinux distribution build.
 
@@ -163,7 +164,7 @@ class ArchlinuxBuildPlugin(ArchlinuxDistributionPlugin, BuildPlugin):
             parameters.get(self.dist.distribution, {}).get("source", {})
         )
 
-    def run(self):
+    def run(self, **kwargs):
         """
         Run plugin for given stage.
         """
@@ -299,7 +300,10 @@ class ArchlinuxBuildPlugin(ArchlinuxDistributionPlugin, BuildPlugin):
             }
 
             chroot_dir = (
-                self.config.cache_dir / "chroot" / self.dist.distribution
+                self.config.cache_dir
+                / "chroot"
+                / self.dist.distribution
+                / self.dist.nva
             )
             chroot_archive = "root.tar.gz"
 

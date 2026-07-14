@@ -29,10 +29,7 @@ from qubesbuilder.config import Config
 from qubesbuilder.distribution import QubesDistribution
 from qubesbuilder.executors import ExecutorError
 from qubesbuilder.executors.container import ContainerExecutor
-from qubesbuilder.plugins import (
-    RPMDistributionPlugin,
-    PluginDependency,
-)
+from qubesbuilder.plugins import PluginDependency, JobDependency, JobReference
 from qubesbuilder.plugins.build import BuildPlugin, BuildError
 
 
@@ -111,7 +108,8 @@ def provision_local_repository(
         raise BuildError(msg) from e
 
 
-class RPMBuildPlugin(RPMDistributionPlugin, BuildPlugin):
+class RPMBuildPlugin(BuildPlugin):
+    dist_filter = staticmethod(lambda d: d.is_rpm())
     """
     RPMBuildPlugin manages RPM distribution build.
 
@@ -143,6 +141,15 @@ class RPMBuildPlugin(RPMDistributionPlugin, BuildPlugin):
         self.dependencies += [
             PluginDependency("chroot_rpm"),
             PluginDependency("build"),
+            JobDependency(
+                JobReference(
+                    component=None,
+                    dist=self.dist,
+                    template=None,
+                    stage="init-cache",
+                    build=None,
+                )
+            ),
         ]
 
         # Add some environment variables needed to render mock root configuration
@@ -171,7 +178,7 @@ class RPMBuildPlugin(RPMDistributionPlugin, BuildPlugin):
                 }
             )
 
-    def run(self):
+    def run(self, **kwargs):
         """
         Run plugin for given stage.
         """
@@ -276,16 +283,31 @@ class RPMBuildPlugin(RPMDistributionPlugin, BuildPlugin):
             mock_conf = f"{self.dist.fullname}-{self.dist.version}-{self.dist.architecture}.cfg"
             # Add prepared chroot cache
             chroot_cache_topdir = (
-                self.config.cache_dir / "chroot" / self.dist.name / "mock"
+                self.config.cache_dir / "chroot" / self.dist.distribution
             )
             chroot_cache = chroot_cache_topdir / mock_conf.replace(".cfg", "")
             if chroot_cache.exists():
                 copy_in += [
-                    (chroot_cache_topdir, self.executor.get_cache_dir())
+                    (chroot_cache, self.executor.get_cache_dir() / "mock")
                 ]
                 cmd += [
                     f"sudo chown -R root:mock {self.executor.get_cache_dir() / 'mock'}"
                 ]
+                # If pre-installed root_cache_install exists, promote it over the
+                # minimal root_cache so mock restores the post-install chroot state.
+                # source_rpm keeps using root_cache/ (minimal) since it only needs
+                # a bare environment to produce SRPMs.
+                mock_cache_dir = (
+                    self.executor.get_cache_dir()
+                    / "mock"
+                    / mock_conf.replace(".cfg", "")
+                )
+                root_cache_install = chroot_cache / "root_cache_install"
+                if root_cache_install.exists():
+                    cmd += [
+                        f"sudo cp {mock_cache_dir}/root_cache_install/cache.tar.gz "
+                        f"{mock_cache_dir}/root_cache/cache.tar.gz"
+                    ]
 
             if self.config.increment_devel_versions:
                 dist_tag = f"{self.component.devel}.{self.dist.tag}"

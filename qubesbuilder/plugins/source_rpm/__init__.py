@@ -32,11 +32,12 @@ from qubesbuilder.config import Config
 from qubesbuilder.distribution import QubesDistribution
 from qubesbuilder.executors import ExecutorError
 from qubesbuilder.executors.container import ContainerExecutor
-from qubesbuilder.plugins import RPMDistributionPlugin, PluginDependency
+from qubesbuilder.plugins import PluginDependency, JobDependency, JobReference
 from qubesbuilder.plugins.source import SourcePlugin, SourceError
 
 
-class RPMSourcePlugin(RPMDistributionPlugin, SourcePlugin):
+class RPMSourcePlugin(SourcePlugin):
+    dist_filter = staticmethod(lambda d: d.is_rpm())
     """
     RPMSourcePlugin manages RPM distribution source.
 
@@ -68,6 +69,15 @@ class RPMSourcePlugin(RPMDistributionPlugin, SourcePlugin):
         self.dependencies += [
             PluginDependency("source"),
             PluginDependency("chroot_rpm"),
+            JobDependency(
+                JobReference(
+                    component=None,
+                    dist=self.dist,
+                    template=None,
+                    stage="init-cache",
+                    build=None,
+                )
+            ),
         ]
 
         # Add some environment variables needed to render mock root configuration
@@ -85,7 +95,7 @@ class RPMSourcePlugin(RPMDistributionPlugin, SourcePlugin):
             }
         )
 
-    def run(self):
+    def run(self, **kwargs):
         """
         Run plugin for given stage.
         """
@@ -236,12 +246,12 @@ class RPMSourcePlugin(RPMDistributionPlugin, SourcePlugin):
 
             # Add prepared chroot cache
             chroot_cache_topdir = (
-                self.config.cache_dir / "chroot" / self.dist.name / "mock"
+                self.config.cache_dir / "chroot" / self.dist.distribution
             )
             chroot_cache = chroot_cache_topdir / mock_conf.replace(".cfg", "")
             if chroot_cache.exists():
                 copy_in += [
-                    (chroot_cache_topdir, self.executor.get_cache_dir())
+                    (chroot_cache, self.executor.get_cache_dir() / "mock")
                 ]
                 cmd += [
                     f"sudo chown -R root:mock {self.executor.get_cache_dir() / 'mock'}"

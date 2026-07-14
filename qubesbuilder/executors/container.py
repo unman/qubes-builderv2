@@ -21,7 +21,7 @@ import tempfile
 from contextlib import contextmanager
 from pathlib import Path, PurePath
 from shlex import quote
-from typing import List, Tuple, Union
+from typing import List, Tuple, Union, Dict, Any
 
 from qubesbuilder.common import sanitize_line
 from qubesbuilder.executors import Executor, ExecutorError
@@ -37,8 +37,8 @@ try:
     from podman import PodmanClient
     from podman.errors import PodmanError
 except ImportError:
-    PodmanClient = None
-    PodmanError = ExecutorError
+    PodmanClient = None  # type: ignore[assignment,misc]
+    PodmanError = ExecutorError  # type: ignore[assignment,misc]
 
 
 class ContainerExecutor(Executor):
@@ -68,19 +68,9 @@ class ContainerExecutor(Executor):
             raise ExecutorError(
                 f"Unknown container client '{self._container_client}'."
             )
-        with self.get_client() as client:
-            try:
-                # Check if we have the image locally
-                docker_image = client.images.get(image)
-            except (PodmanError, DockerException):
-                # Try to pull the image
-                try:
-                    docker_image = client.images.pull(image)
-                except (PodmanError, DockerException) as e:
-                    raise ExecutorError(f"Cannot find {image}.") from e
 
-        self._attrs = docker_image.attrs
-
+        self._image = image
+        self._attrs: Dict[Any, Any] = {}
         self.container: Container = None  # type: ignore
 
     @contextmanager
@@ -97,10 +87,18 @@ class ContainerExecutor(Executor):
                 "max_pool_size",
             )
         }
+        client = None
         try:
-            yield self._client(**kwargs)
+            client = self._client(**kwargs)
+            yield client
         except (PodmanError, DockerException, ValueError) as e:
             raise ExecutorError("Cannot connect to container client.") from e
+        finally:
+            if client is not None:
+                try:
+                    client.close()
+                except Exception:
+                    pass
 
     def get_user(self):
         return self._user
@@ -175,6 +173,20 @@ class ContainerExecutor(Executor):
     ):
         try:
             with self.get_client() as client:
+                # Check if we have the image locally and pull if needed
+                try:
+                    docker_image = client.images.get(self._image)
+                except (PodmanError, DockerException):
+                    # Try to pull the image
+                    try:
+                        docker_image = client.images.pull(self._image)
+                    except (PodmanError, DockerException) as e:
+                        raise ExecutorError(
+                            f"Cannot find {self._image}."
+                        ) from e
+
+                self._attrs = docker_image.attrs
+
                 # prepare container for given image and command
                 image = client.images.get(self._attrs["Id"])
 

@@ -102,8 +102,30 @@ Then, clone the disposable template based on Fedora 39, `fedora-39-dvm`, to
 `qubes-builder-dvm`. Set its private volume storage space to at least 30 GB.
 
 Let's assume that the qube hosting `qubes-builder` is called `work-qubesos`.
-(If you're using a different name, make sure to adjust your policies.) In
-`dom0`, copy `rpc/policy/50-qubesbuilder.policy` to `/etc/qubes/policy.d`.
+In `dom0`, render and install the RPC policy (adjust the variable values if
+your qube names differ):
+
+```bash
+SOURCE_QUBE=work-qubesos
+BUILDER_DVM=qubes-builder-dvm
+cat <<EOF | sudo tee /etc/qubes/policy.d/50-qubesbuilder.policy
+admin.vm.CreateDisposable * ${SOURCE_QUBE} dom0 allow target=dom0
+admin.vm.CreateDisposable * ${SOURCE_QUBE} ${BUILDER_DVM} allow target=dom0
+
+admin.vm.CurrentState * ${SOURCE_QUBE} @tag:disp-created-by-${SOURCE_QUBE} allow target=dom0
+admin.vm.List         * ${SOURCE_QUBE} @tag:disp-created-by-${SOURCE_QUBE} allow target=dom0
+admin.vm.Start        * ${SOURCE_QUBE} @tag:disp-created-by-${SOURCE_QUBE} allow target=dom0
+admin.vm.Kill         * ${SOURCE_QUBE} @tag:disp-created-by-${SOURCE_QUBE} allow target=dom0
+admin.vm.Remove       * ${SOURCE_QUBE} @tag:disp-created-by-${SOURCE_QUBE} allow target=dom0
+
+qubesbuilder.FileCopyIn  * ${SOURCE_QUBE} @tag:disp-created-by-${SOURCE_QUBE} allow
+qubesbuilder.FileCopyOut * ${SOURCE_QUBE} @tag:disp-created-by-${SOURCE_QUBE} allow
+
+qubes.Filecopy       * ${SOURCE_QUBE} @tag:disp-created-by-${SOURCE_QUBE} allow
+qubes.WaitForSession * ${SOURCE_QUBE} @tag:disp-created-by-${SOURCE_QUBE} allow
+qubes.VMShell        * ${SOURCE_QUBE} @tag:disp-created-by-${SOURCE_QUBE} allow
+EOF
+```
 
 Now, start the disposable template `qubes-builder-dvm` and create the following
 directories:
@@ -130,109 +152,382 @@ Set `qubes-builder-dvm` as the default disposable template for `work-qubesos`:
 $ qvm-prefs work-qubesos default_dispvm qubes-builder-dvm
 ```
 
+### Qubes executor for secureboot signing
+
+The `vmm-xen-unified` component builds a signed unified Xen+Linux binary. It
+requires additional setup for the signing process. This approach will use
+separate disposable template for just `vmm-xen-unified` component and have that
+disposable access to the signing service.
+
+Building `vmm-xen-unified` with docker executor is currently not supported.
+
+First, you will need to generate (or otherwise obtain) signing key. This step
+is not specific to qubes-builderv2, can be done with any tool. See README in
+`vmm-xen-unified` for example approach. Store the keys in a separate
+(preferably network-disconnected) qube (if you use HSM or other hardware token
+- configure its usage in that qube). Later steps in this instruction use
+`vault-pesign` name for this qube, but it can be anything. Copy
+`rpc/qubesbuilder.PESign` to `/usr/local/etc/qubes-rpc` in the key-holding qube
+and make sure it's executable:
+```
+chmod +x /usr/local/etc/qubes-rpc/qubesbuilder.PESign
+```
+
+If extra parameters for using the key are needed for `pesign`, add `/home/user/.config/qubes-pesign/CERT_NICKNAME` (where `CERT_NICKNAME` is a name used for `KEY_NAME` value later in this instruciton) to set the arguments, for example:
+```
+# dbpath with pkcs11 module configured
+PESIGN_ARGS+=( "--certdir=$HOME/pesign-token-db" )
+# token name
+PESIGN_ARGS+=( "--token=token name" )
+# pinfile path, if relevant
+PESIGN_ARGS+=( "--pinfile=$HOME/pesign-token-pin.txt" )
+# you can also override CERTIFICATE
+CERTIFICATE="certificate name as on the token"
+```
+
+After doing that, create new disposable template following the above
+instructions, but name it `qubes-pesign-builder-dvm`.
+
+Then, in the `qubes-pesign-builder-dvm` do the following:
+```
+mkdir -p /rw/bind-dirs/etc/systemd/system/
+mkdir -p /usr/local/etc/default
+# adjust value if you used different key nickname, replace spaces with __
+echo 'KEY_NAME="Qubes__OS__Unified__Kernel__Image__Signing__Key"' > /usr/local/etc/default/qubes-pesign
+mkdir -p /rw/config/qubes-bind-dirs.d
+cat <<EOF > /rw/config/qubes-bind-dirs.d/50_qubes-pesign.conf
+binds+=( '/etc/systemd/system/qubes-pesign.socket' )
+binds+=( '/etc/systemd/system/qubes-pesign@.service' )
+EOF
+```
+
+Copy `rpc/qubes-pesign*` from qubes-builderv2 into `/rw/bind-dirs/etc/systemd/system/` in `qubes-pesign-builder-dvm` and set appropriate SELinux context (if SELinux is enabled there):
+```
+restorecon /rw/bind-dirs/etc/systemd/system/*
+```
+
+Add starting the service in `/rw/config/rc.local`:
+```
+systemctl daemon-reload
+systemctl start qubes-pesign.socket
+```
+
+Next step is to adjust qrexec policy to allow signing. To not depend on specific dispvm name, the policy will use tags. The `rpc/policy/50-qubesbuilder.policy` file contains commented-out example. Adjust key-holding qube name and possibly certificat nickname there.
+And then add appropriate tag to the `qubes-pesign-builder-dvm`:
+```
+qvm-tags qubes-pesign-builder-dvm add pesign-allow
+```
+
+And finally, enable building `vmm-xen-unified` using just configured disposable
+template by adding the following to your `builder.yml`:
+
+```
++components:
+  - vmm-xen-unified:
+      packages: true
+      stages:
+      - build:
+          executor:
+            type: qubes
+            options:
+              dispvm: qubes-pesign-builder-dvm
+```
 
 ## Windows executors and building Windows Tools
 
-There are two different Windows executors: `SSHWindowsExecutor` and `WindowsQubesExecutor`.
-Prerequisites for both executors are a superset of the Qubes executor (see above).
-For code signing you need `osslsigncode` installed in the Linux disposable template
-and the signing vault qube (see below).
+Two Windows executor types are available: `windows-ssh` (`SSHWindowsExecutor`) and `windows` (`WindowsQubesExecutor`).
+Both require the same prerequisites as the Qubes executor (see above).
 
-### `SSHWindowsExecutor`
+### `windows-ssh` executor (SSH to a Windows machine)
 
-This executor is meant for development, it uses SSH to communicate with a Windows system
-that is used for building. Scripts that can automatically create such qube are found
-in the `tools/windows` directory (they require `genisoimage` installed in the disposable template
-(`qubes-builder-dvm`)). You will need an unmodified Windows 10/11 installation iso and about
-50GiB of disk space.
+This executor communicates with a Windows build machine over SSH.
+It is used for the initial bootstrap for building Qubes Windows Tools before QWT is available to install.
+The worker can be either a dedicated Qubes HVM qube (set up with the scripts below) or any SSH-accessible Windows 10/11 machine you manage manually.
 
-First, create an edited installation iso by running `generate-iso.sh`. This script
-downloads prerequisites (OpenSSH server for Windows and Microsoft EWDK iso) and prepares
-the installation image for unattended Windows installation. After the image is generated,
-run `dom0/create-vm.sh` in dom0 to actually create and configure the worker qube (passing
-the generated installation image as a `--iso` parameter). After the script finishes, the worker
-qube is ready to use by the builder.
+#### Option A - Automated Qubes HVM setup
 
-The worker qube has outbound network connections blocked in the firewall, this is configured
-by the `create-vm.sh` script. An ssh key is generated by the `generate-iso.sh` script,
-the private part is saved in `~/.ssh/win-build.key` by default while the public part
-is copied to the generated Windows installation image.
+The `tools/windows/` directory contains scripts that create and fully configure the bootstrap worker qube.
+You need an unmodified Windows 10 or 11 installation ISO and about 50 GiB of free disk space.
+`genisoimage` must be installed in the builder disposable template (`qubes-builder-dvm`).
 
-If the `ssh-vm` option is set in the `builder.yml` (see below), the SSH executor automatically
-starts the given vm. This option also requires the `ewdk` option, that specifies path to EWDK iso
-(in `work-qubesos`). Is `ssh-vm` it's assumed that the SSH machine is configured manually.
+**1 - Download prerequisites and build the installation ISO**
 
-You can also use any SSH-accessible Windows machine instead.
+Run the following from inside the builder qube (`work-qubesos`):
 
-### `WindowsQubesExecutor`
+```bash
+cd tools/windows
+./generate-iso.sh --iso /path/to/windows.iso --output win-build.iso
+```
 
-This executor works in the same manner as the Linux Qubes executor. It requires a Windows
-disposable template with Qubes Windows Tools installed (you can use the SSH executor first
-to build QWT).
+`generate-iso.sh` does the following:
 
-### General information
+- Downloads and SHA256-verifies three prerequisites via a disposable VM:
+  - `win-opensshd.msi` - Win32-OpenSSH server
+  - `ewdk.iso` - Microsoft Enterprise WDK (used at build time)
+  - `git.exe` - Git for Windows
+- Generates an SSH key pair at `~/.ssh/win-build.key` (skips generation if the key already exists). The public key is embedded in the installation image.
+- Calls `edit-iso.sh`, which mounts the source ISO in a disposable VM, injects `autounattend.xml` and the helper scripts into the image, and writes the result to `win-build.iso`.
 
-It is recommended to turn off Microsoft Defender in the worker qube (especially real-time
-protection) because it slows down building significantly. This is not done during unattended
-setup because there is no supported way for automating this. (TODO: it enables itself after
-restart which is a pain for dispvms).
+The resulting ISO performs a fully unattended Windows installation: disk partitioning, user creation, Git and OpenSSH server installation and SSH key authorisation.
 
-A separate vault-type qube is needed for code-signing Windows binaries. Let's assume it's named
-`vault-sign`. This qube has access to actual signing keys used, either production ones (TODO:
-in a HSM), or ephemeral self-signed keys. Communication with the `vault-sign` qube goes through
-Qubes RPC: install RPC service scripts from `rpc/qubes.WinSign.*` in the vault qube (make sure
-they are permanent in `/etc/qubes-rpc`, see [bind dirs](https://www.qubes-os.org/doc/bind-dirs/)).
-`qubesbuilder.WinSign.Timestamp` needs to be installed in the default Linux disposable template
-(`qubes-builder-dvm`). You also need to configure RPC policy in `dom0`, copy
-`rpc/policy/51-qubesbuilder-windows.policy` to `/etc/qubes/policy.d` there (make sure the qube
-names are correct).
+**2 - Create the bootstrap worker qube**
+
+Run in `dom0`:
+
+```bash
+# Copy the script to dom0 first
+qvm-run --pass-io work-qubesos 'cat tools/windows/dom0/create-vm.sh' > /tmp/create-vm.sh
+bash /tmp/create-vm.sh --iso work-qubesos:/home/user/tools/windows/win-build.iso
+```
+
+`create-vm.sh` does the following:
+
+- Creates a `StandaloneVM` HVM named `win-build` with a 40 GiB root volume.
+- Configures the firewall: all outbound traffic from the worker qube is **blocked**; inbound connections from the builder qube to the worker are allowed via an `nft` rule in the shared firewall VM.
+- Boots the worker with the installation ISO attached, then polls via SSH until Windows finishes the unattended setup (this takes several minutes).
+- Shuts the worker down. The EWDK ISO is attached automatically by the executor at build time via `admin.vm.device.block.Attach` (default `ewdk-mode: attach`). It does not need to be attached manually. Alternatively, set `ewdk-mode: copy` to have the executor SCP the ISO into the VM and mount it with PowerShell instead.
+
+**3 - Build QWT using `windows-ssh`**
+
+Use `windows-ssh` to connect directly to `win-build` over SSH.
+Get its IP address from `dom0`:
+
+```bash
+qvm-prefs win-build ip
+```
+
+Configure `builder.yml`:
+
+```yaml
+# builder.yml
+distributions:
+  - vm-win10:
+      stages:
+        - build:
+            executor:
+              type: windows-ssh
+              options:
+                ssh-ip: 10.137.0.20           # output of: qvm-prefs win-build ip
+                ssh-vm: win-build             # auto-start worker qube
+                ewdk: tools/windows/ewdk.iso  # path inside work-qubesos
+                ewdk-mode: attach             # 'attach' (default): Qubes block device attach
+                                              # 'copy': SCP ISO into VM, mount via PowerShell
+                user: user
+```
+
+See `Windows-specific build stage options` section for all the available options.
+
+#### Option B - Manual or external Windows machine
+
+If you already have a Windows 10/11 machine accessible over SSH (whether a Qubes HVM you configured yourself, a bare-metal machine, or a VM in another hypervisor), skip the scripts above.
+
+First, download the EWDK ISO on the builder host using `get-files.sh`:
+
+```bash
+tools/windows/get-files.sh -o tools/windows tools/windows/deps.txt
+```
+
+This downloads `ewdk.iso` into `tools/windows/`.
+
+Configure the executor with the local path to the ISO:
+
+```yaml
+distributions:
+  - vm-win10:
+      stages:
+        - build:
+            executor:
+              type: windows-ssh
+              options:
+                ssh-ip: 10.137.0.20              # IP of the Windows machine
+                ssh-key-path: ~/.ssh/win-build.key
+                user: user
+                ewdk: tools/windows/ewdk.iso     # SCPed to c:\Users\<user>\ewdk.iso on first run
+```
+
+On each build run, the executor will:
+1. Compute the SHA256 of the local `ewdk.iso` and compare it against `c:\Users\<user>\ewdk.iso` on the remote machine. The ISO is transferred only if missing or the checksum differs.
+2. Mount the ISO via PowerShell `Mount-DiskImage` (idempotent and skipped if already mounted).
+
+The machine must have OpenSSH server running and the builder's public key authorised.
+
+### `windows` executor (Windows disposable qubes)
+
+This executor works like the Linux Qubes executor: each build runs inside a fresh Windows disposable qube created from a template.
+It requires a separate `win-build` qube configured as a disposable VM template (`template_for_dispvms=true`) with Qubes Windows Tools installed.
+Setting up this dispvm template is a distinct procedure: install QWT (built via `windows-ssh` above) into a Windows qube, then mark it as a dispvm template in `dom0`:
+
+```bash
+qvm-prefs win-build template_for_dispvms true
+```
+
+The `qubesbuilder.WinFileCopyIn` and `qubesbuilder.WinFileCopyOut` RPC handlers (from `rpc/`) are copied into the disposable qube at runtime by the executor, so no manual persistent installation is required in `win-build`.
+
+> **Note:** The `c:\build` directory must **not** exist in the `win-build` template. Its presence can cause build failures when the executor copies files into the disposable. If you converted a qube previously used for SSH-based builds into the disposable template, make sure to delete that directory before marking it as `template_for_dispvms`.
+
+Once `win-build` is ready, configure the builder:
+
+```yaml
+distributions:
+  - vm-win10:
+      stages:
+        - build:
+            executor:
+              type: windows
+              options:
+                dispvm: win-build             # disposable template (default: win-build)
+                ewdk: tools/windows/ewdk.iso  # path inside work-qubesos
+                user: user
+```
+
+### Code signing vault qube
+
+Authenticode signing is performed by a separate vault-type qube (referred to as `vault-sign` in the examples below). The signing qube never has network access. The builder communicates with it exclusively through Qubes RPC.
+
+**1 - Install RPC services in the signing qube**
+
+Copy the `rpc/qubesbuilder.WinSign.*` scripts into `vault-sign` and make them persistent:
+
+```bash
+# Inside vault-sign (or via qvm-run)
+sudo mkdir -p /usr/local/etc/qubes-rpc
+sudo cp qubesbuilder.WinSign.{common,CreateKey,DeleteKey,GetCert,QueryKey,Sign} /usr/local/etc/qubes-rpc/
+sudo restorecon -R /usr/local/etc/qubes-rpc/
+```
+
+Signing keys are stored in `/home/user/win-sign/keys/` inside the vault qube.
+For test signing, keys are generated automatically (ephemeral per component).
+For production signing, import your CA-signed key into that directory beforehand.
+
+**2 - Install the timestamp service in the Linux disposable template**
+
+The `qubesbuilder.WinSign.Timestamp` service runs in the default Linux disposable template `qubes-builder-dvm`:
+
+```bash
+# Inside qubes-builder-dvm (or via qvm-run)
+sudo cp rpc/qubesbuilder.WinSign.Timestamp /usr/local/etc/qubes-rpc/
+sudo restorecon -R /usr/local/etc/qubes-rpc/
+```
+
+`osslsigncode` must be installed in the template used by `qubes-builder-dvm`.
+
+**3. Install the RPC policy in dom0**
+
+Render and install the policy from `dom0` (adjust the variable values to match
+your qube names):
+
+```bash
+SOURCE_QUBE=work-qubesos
+WINDOWS_BUILDER=win-build
+WINDOWS_VAULT=vault-sign
+cat <<EOF | sudo tee /etc/qubes/policy.d/51-qubesbuilder-windows.policy
+admin.vm.device.block.Attach    * ${SOURCE_QUBE} @tag:disp-created-by-${SOURCE_QUBE} allow target=dom0
+admin.vm.device.block.Assign    * ${SOURCE_QUBE} @tag:disp-created-by-${SOURCE_QUBE} allow target=dom0
+qubesbuilder.WinSign.Timestamp  * ${SOURCE_QUBE} @tag:disp-created-by-${SOURCE_QUBE} allow
+qubesbuilder.WinFileCopyIn      * ${SOURCE_QUBE} @tag:disp-created-by-${SOURCE_QUBE} allow
+qubesbuilder.WinFileCopyOut     * ${SOURCE_QUBE} @tag:disp-created-by-${SOURCE_QUBE} allow
+
+admin.vm.device.block.Available * ${SOURCE_QUBE} ${SOURCE_QUBE} allow target=dom0
+
+admin.vm.CurrentState           * ${SOURCE_QUBE} ${WINDOWS_BUILDER} allow target=dom0
+admin.vm.List                   * ${SOURCE_QUBE} ${WINDOWS_BUILDER} allow target=dom0
+admin.vm.Start                  * ${SOURCE_QUBE} ${WINDOWS_BUILDER} allow target=dom0
+admin.vm.device.block.Attached  * ${SOURCE_QUBE} ${WINDOWS_BUILDER} allow target=dom0
+admin.vm.device.block.Assigned  * ${SOURCE_QUBE} ${WINDOWS_BUILDER} allow target=dom0
+admin.vm.device.block.Attach    * ${SOURCE_QUBE} ${WINDOWS_BUILDER} allow target=dom0
+admin.vm.device.block.Assign    * ${SOURCE_QUBE} ${WINDOWS_BUILDER} allow target=dom0
+
+qubesbuilder.WinSign.QueryKey  +Qubes__Windows__Tools ${SOURCE_QUBE} ${WINDOWS_VAULT} allow
+qubesbuilder.WinSign.CreateKey +Qubes__Windows__Tools ${SOURCE_QUBE} ${WINDOWS_VAULT} allow
+qubesbuilder.WinSign.DeleteKey +Qubes__Windows__Tools ${SOURCE_QUBE} ${WINDOWS_VAULT} allow
+qubesbuilder.WinSign.GetCert   +Qubes__Windows__Tools ${SOURCE_QUBE} ${WINDOWS_VAULT} allow
+qubesbuilder.WinSign.Sign      +Qubes__Windows__Tools ${SOURCE_QUBE} ${WINDOWS_VAULT} allow
+EOF
+```
+
+
+### General recommendations
+
+It is recommended to turn off Microsoft Defender in the worker qube (especially real-time protection) because it slows down building significantly. This is not done during unattended setup because there is no supported way for automating this.
+
+TODO: it enables itself after restart which is a pain for dispvms.
 
 
 ## Build stages
 
 The build process consists of the following stages:
 
-- fetch
-- prep
-- build
-- post
-- verify
-- sign
-- publish
-- upload
+- `fetch` --- download and verify sources
+- `prep` --- create source packages
+- `build` --- build source packages
+- `post` --- post-build processing
+- `verify` --- verify built packages
+- `sign` --- sign built packages
+- `publish` --- publish signed packages to a local repository
+- `upload` --- upload the published repository to a remote server
 
-Currently, only these are used:
+There is also a special stage not part of the default sequence:
 
-- fetch (download and verify sources)
-- prep (create source packages)
-- build (build source packages)
-- sign (sign built packages)
-- publish (publish signed packages)
-- upload (upload published repository to a remote server)
+- `init-cache` --- initialize the chroot cache (Mock, pbuilder, etc.)
+
+### Stage dependencies
+
+When calling a source-building stage, prerequisite stages are resolved and
+run automatically in the right order:
+
+- `prep` runs `fetch` first (if not already done), then `init-cache`, then `prep`
+- `build` runs `fetch`, `init-cache`, `prep`, then `build`
+- `post` and `verify` follow the same pattern
+- `sign` runs `fetch`, `init-cache`, `prep`, `build`, then `sign`
+- `publish` runs `fetch`, `init-cache`, `prep`, `build`, `sign`, then `publish`
+
+`upload` and `init-cache` work from artifacts already on disk and do not
+trigger `fetch` or earlier stages.
+
+### Fetch behavior
+
+`fetch` runs automatically when any of `prep`, `build`, `post`, `verify`,
+`sign`, or `publish` are requested, unless `skip-git-fetch: true` is set in
+the configuration. It runs at most once per session even when stages are
+chained.
+
+Only `upload` and `init-cache` never trigger `fetch`.
+
+The devel version counter (`increment-devel-versions`) is bumped whenever
+fetch detects that the source has changed.
 
 
 ## Plugins
 
-- `fetch` --- Manages the general fetching of sources
-- `source` --- Manages general distribution sources
-- `source_rpm` --- Manages RPM distribution sources
-- `source_deb` --- Manages Debian distribution sources
-- `source_windows` --- Manages Windows sources
-- `build` --- Manages general distribution building
-- `build_rpm` --- Manages RPM distribution building
-- `build_deb` --- Manages Debian distribution building
-- `build_windows` --- Manages Windows building (Visual Studio solutions)
-- `sign` --- Manages general distribution signing
-- `sign_rpm` --- Manages RPM distribution signing
-- `sign_deb` --- Manages Debian distribution signing
-- `publish` --- Manages general distribution publishing
-- `publish_rpm` --- Manages RPM distribution publishing
-- `publish_deb` --- Manages Debian distribution publishing
-- `upload` --- Manages general distribution uploading
-- `template` --- Manages general distribution releases
-- `template_rpm` --- Manages RPM distribution releases
-- `template_deb` --- Manages Debian distribution releases
-- `template_whonix` --- Manages Whonix distribution releases
+- `fetch` --- fetch and verify sources
+- `source` --- common source package logic
+- `source_rpm` --- RPM source packages
+- `source_deb` --- Debian source packages
+- `source_windows` --- Windows sources
+- `chroot_rpm` --- Mock chroot cache (`init-cache`)
+- `chroot_deb` --- pbuilder chroot cache (`init-cache`)
+- `chroot_archlinux` --- Arch Linux chroot cache (`init-cache`)
+- `build` --- common build logic
+- `build_rpm` --- RPM builds
+- `build_deb` --- Debian builds
+- `build_windows` --- Windows builds (Visual Studio)
+- `build_archlinux` --- Arch Linux builds
+- `sign` --- common signing logic
+- `sign_rpm` --- RPM signing
+- `sign_deb` --- Debian signing
+- `publish` --- common publish logic
+- `publish_rpm` --- RPM repository publishing
+- `publish_deb` --- Debian repository publishing
+- `publish_archlinux` --- Arch Linux repository publishing
+- `upload` --- upload published repository to a remote server
+- `list_deps` --- base plugin for the `list-deps` stage
+- `list_deps_rpm` --- RPM build dependency extraction
+- `list_deps_deb` --- Debian build dependency extraction
+- `list_deps_archlinux` --- Arch Linux build dependency extraction
+- `template` --- common template build logic
+- `template_rpm` --- RPM-based template builds
+- `template_deb` --- Debian-based template builds
+- `template_whonix` --- Whonix template builds
 
 
 ## CLI
@@ -260,6 +555,8 @@ Commands:
   installer   Installer CLI
   config      Config CLI
   cleanup     Cleanup CLI
+  list-deps   List build dependencies
+  self        Self-management CLI (upgrade qubes-builderv2 in place)
 
 Stages:
     fetch prep build post verify sign publish upload
@@ -309,32 +606,214 @@ artifacts/
 
 ### Package
 
-You can start building the components defined in this development configuration
-with:
+Build components:
+
+```bash
+$ ./qb package build
+```
+
+This automatically runs `fetch`, `init-cache`, and `prep` first as needed.
+You can also call stages explicitly:
 
 ```bash
 $ ./qb package fetch prep build
 ```
 
-If GPG is set up on your host, specify the key and client to be used inside
-`builder.yml`. Then, you can test the sign and publish stages:
+Sign and publish:
 
 ```bash
 $ ./qb package sign publish
 ```
 
-You can trigger the whole build process as follows:
+Run all stages in one go:
 
 ```bash
 $ ./qb package all
 ```
 
-It is possible to initialize a chroot cache, e.g. for Mock and pbuilder, by calling
-Package CLI with stage `init-cache`. This particular stage is not included in
-the `all` alias. Indeed, if a cache is detected at `prep` ou `build` stages, it
-will be used. As cache could be provided either by using `init-cache` or any
-other method that a user would use, we keep it as dedicated call.
+Initialize the chroot cache (Mock, pbuilder) explicitly:
 
+```bash
+$ ./qb package init-cache
+```
+
+`init-cache` is not part of `all` --- it runs automatically as a dependency
+of `prep` and `build` when needed.
+
+To inspect what would run without executing anything:
+
+```bash
+$ ./qb package pipeline build
+$ ./qb package pipeline --format yaml upload
+$ ./qb package pipeline --no-deps sign   # show only the requested stage
+```
+
+
+### List-deps
+
+The `list-deps` command reads the build dependencies declared in each
+component's packaging files (spec, control, PKGBUILD) and produces a
+`cache` YAML block ready to paste into `builder.yml`. No chroot is needed:
+the extraction runs against the rendered source files inside a container.
+
+**Run the stage and print the result:**
+
+```bash
+$ ./qb -c core-vchan-xen -d host-fc41 -d vm-bookworm list-deps run
+```
+
+This runs the `list-deps` stage for the given components and distributions,
+then prints the aggregated `cache` block to stdout:
+
+```yaml
+cache:
+  host-fc41:
+    packages:
+    - gcc
+    - xen-devel >= 4.2
+  vm-bookworm:
+    packages:
+    - debhelper
+    - libxen-dev
+```
+
+**Print from existing artifacts (no stage run):**
+
+```bash
+$ ./qb list-deps show
+```
+
+This reads already-produced `list-deps` artifacts and prints the same YAML
+without running the stage again.
+
+**Merge into `builder.yml` in-place:**
+
+```bash
+$ ./qb list-deps update builder.yml
+```
+
+This merges the collected packages into the `cache` section of the given
+file. Existing entries are preserved and new ones are added. A `.bak` backup
+is written before the file is rewritten. Note that PyYAML rewrites the file,
+so comments and original formatting are lost.
+
+**Skip the git fetch when sources are already present:**
+
+By default, `list-deps run` fetches sources first. To skip that step:
+
+```bash
+$ ./qb -o skip-git-fetch=true list-deps run
+```
+
+If the source hash has not changed since the last run, the stage is skipped
+automatically and the cached result is used.
+
+**Exclude packages by name pattern:**
+
+By default, `qubes-*` packages are dropped from the output because they are
+built by the pipeline itself and cannot be pre-installed from upstream repos.
+Override the default in `builder.yml`:
+
+```yaml
+list-deps:
+  exclude:
+    - '^qubes-'
+    - '^xen-'
+```
+
+Set `exclude: []` to disable filtering. Patterns are Python regexes matched
+against the package name (without the version constraint). The CLI exposes a
+repeatable `--exclude` flag that appends to whatever is configured:
+
+```bash
+$ ./qb list-deps show --exclude '^xen-' --exclude '^perl-'
+```
+
+**Per-distribution caveats:**
+
+- **DEB**: `debian-parser` strips version constraints from `Build-Depends`,
+  so the cache always contains bare names (e.g. `python3-foo`, never
+  `python3-foo >= 1.2`). RPM and Arch keep `NAME OP VERSION` forms.
+- **RPM virtual provides**: dependencies like `pkgconfig(systemd)` or
+  `perl(File::Find)` are dropped by the safety filter (parentheses are
+  blocked to prevent shell injection). Anything satisfied only by
+  a virtual provide will not be pre-installed via
+  `cache.<dist>.packages`.
+
+### Self-upgrade
+
+`qb self upgrade` fast-forwards the running qubes-builderv2 checkout in
+place by running the same fetch + signature-verification logic that is used
+for every other component. It is the only supported way to update
+qubes-builderv2 from `qb`.
+
+```bash
+$ ./qb self upgrade
+```
+
+This is a separate, non-chainable subcommand: it always runs on its own. Re-run
+`qb` afterwards so the freshly fetched code is loaded.
+
+- A dirty working tree blocks the upgrade. Commit or stash your changes first
+  (the merge is `--ff-only`, so real conflicts still fail).
+- The `artifacts/` directory is never touched.
+
+Configure in `builder.yml`:
+
+```yaml
+self-upgrade:
+  url: https://github.com/QubesOS/qubes-builderv2
+  branch: main
+  # maintainers: inherited from git.maintainers if omitted
+  # min-distinct-maintainers: 1    # distinct maintainer signatures required
+  # verification-mode: signed-tag | less-secure-signed-commits-sufficient | insecure-skip-checking
+  # check-for-updates: true        # automatic notice on build commands
+  # check-interval: 86400          # seconds between remote checks (once a day)
+```
+
+If `self-upgrade` is omitted, defaults are:
+- URL `https://github.com/QubesOS/qubes-builderv2`,
+- the current git branch when it exists on the remote and `main` otherwise,
+- maintainers taken from `git.maintainers`, `verification-mode: signed-tag`.
+
+An explicitly configured `branch` is used as-is (no fallback). Verification
+works like a component fetch: the commit or tag must be signed by a key listed
+in `maintainers` (inherited from `git.maintainers`), and nothing is trusted just
+for being bundled. Key files are looked up as `{KEYID}.asc` in the configured
+`key-dirs` and in the keys shipped under `qubesbuilder/plugins/fetch/keys/`.
+
+Branch handling:
+
+- The upgraded branch is your current branch when it exists on the remote,
+  otherwise `main`. An explicit `self-upgrade.branch` is never overridden.
+- When you upgrade from a different branch than the upgraded one (e.g. a dev
+  branch), `qb self upgrade` advances the target branch (e.g. local `main`)
+  and checks your original branch back out. Your branch is left untouched.
+  Merge or rebase it onto the updated branch yourself.
+
+#### Update notifications
+
+Build subcommands (`package`, `template`, `installer`) print a one-line notice
+at the end of the run when a newer qubes-builderv2 is available on the
+configured branch (at the end so it is not lost in the build output):
+
+- Queried with `git ls-remote` (no fetch) at most once per `check-interval`
+  (default daily). The last check is recorded in `artifacts/self-upgrade-check.json`.
+- *Available* means the remote tip is not yet in the history of the matching
+  local branch (e.g. local `main`), not the checked-out HEAD, so a divergent
+  dev branch does not fail the result. Local commits on top do not cause a
+  false notice.
+- No signatures are checked for the notice. An unsigned or badly signed commit
+  still shows, but `qb self upgrade` refuses to apply it.
+
+Disable with `self-upgrade.check-for-updates: false`, or per-invocation with
+`QUBES_BUILDER_NO_UPDATE_CHECK=1` (handy in CI).
+
+Check on demand (ignores the throttle, never modifies the checkout):
+
+```bash
+$ ./qb self check
+```
 
 ### Template
 
@@ -386,7 +865,7 @@ Or publish all the templates provided in `builder.yml` in
 Similar commands are available for packages, for example:
 
 ```bash
-./qb -d host-fc32 -c core-qrexec repository publish current-testing
+./qb -d host-fc41 -c core-qrexec repository publish current-testing
 ```
 
 and
@@ -486,7 +965,7 @@ We provide the following list of available keys:
   plus a commit id or tag will be used.
 
 Here is a non-exhaustive list of distribution-specific keys:
-- `host-fc32` --- Fedora 32 for the `host` package set content only
+- `host-fc41` --- Fedora 41 for the `host` package set content only
 - `vm-bullseye` --- Bullseye for the `vm` package set only
 
 `build_windows` specific: all output artifacts for a component need to be specified in
@@ -788,7 +1267,7 @@ Options available in `builder.yml`:
   - `branch: str` --- git branch (default: main).
   - `maintainers: List[str]` --- List of extra fingerprint allowed for signature verification of git commit and tag. See `key-dirs` option for providing the public keys.
 
-- `skip-git-fetch: bool` --- When set, do not update already downloaded git repositories (those in `sources` artifacts dir). New components are still fetched (once). Useful when doing development builds from non-default branches, local modifications etc.
+- `skip-git-fetch: bool` --- When set, do not update already downloaded git repositories (those in `sources` artifacts dir). New components are still fetched (once). Useful when doing development builds from non-default branches, local modifications etc. The default is `True`.
 
 - `skip-files-fetch: bool` --- When set, do not fetch component files like source tarballs (those in the `distfiles` artifacts dir). Component builds *will fail* without those files. Useful to save time and space when fetching git repositories.
 
@@ -834,6 +1313,7 @@ Options available in `builder.yml`:
   - `deb: str` --- Debian content.
   - `archlinux: str` --- Archlinux content.
   - `iso: str` --- ISO content.
+  - `windows: str` --- Windows content.
 
 - `less-secure-signed-commits-sufficient: list` --- List of component names where signed commits is allowed instead of requiring signed tags. This is less secure because only commits that have been reviewed are tagged.
 
@@ -855,7 +1335,7 @@ Options available in `builder.yml`:
 - Options specific to the `windows` and `windows-ssh` executors (see `example-configs/windows-tools.yml`):
   - `user: str` --- Name of the user account in the worker Windows machine/VM (default: `user`).
   - `threads: int` --- Number of parallel threads to use for MSBuild (default: 1).
-  - `ewdk: str` --- Path to the EWDK iso file that will be attached to the worker qube.
+  - `ewdk: str` --- Path to the EWDK iso file. For the `windows` executor: always attached as a Qubes block device to the disposable VM. For `windows-ssh`: behaviour is controlled by `ewdk-mode` (see below).
 
 - Options specific to the `windows` executor:
   - `dispvm: str` --- Name of the disposable Windows template (default: `win-build`).
@@ -863,7 +1343,11 @@ Options available in `builder.yml`:
 - Options specific to the `windows-ssh` executor:
   - `ssh-key-path: str` --- Path to the private ssh key used for communication with the worker machine (default: `~/.ssh/win-build.key`).
   - `ssh-ip: str` --- IP address to use when connecting to the worker machine.
-  - `ssh-vm: str` --- Name of the worker qube (optional). If specified, this qube is started automatically and the EWDK iso is attached to it as a block device.
+  - `ssh-vm: str` --- Name of the worker qube (optional). If set, the target is treated as a Qubes HVM: the qube is started automatically before connecting and `ewdk-mode` controls how the EWDK is provided. Without `ssh-vm`, the target is any SSH-reachable Windows machine (physical or otherwise) and the EWDK ISO is always SCPed to `c:\Users\<user>\ewdk.iso` and mounted via PowerShell.
+  - `ewdk-mode: str` --- Controls how the EWDK ISO is provided when `ssh-vm` is set (default: `attach`). Has no effect without `ssh-vm`.
+    - `attach`: attach the ISO as a Qubes block device to the worker qube before starting it (via `admin.vm.device.block.Attach`). Requires the builder to run inside Qubes with access to the Admin API. This is an error if `ssh-vm` is not set.
+    - `copy`: SCP the ISO to `c:\Users\<user>\ewdk.iso` inside the running VM and mount it via PowerShell. Use this when Qubes block-device attachment is not available, e.g. the builder is running outside a Qubes environment.
+  - `ewdk-skip-checksum: bool` --- When using SCP transfer (`ewdk-mode: copy` with `ssh-vm`, or no `ssh-vm`), skip SHA256 verification and only transfer the ISO if absent on the remote host (default: `false`).
 
 - `stages: List[str, Dict]` --- List of stages to trigger.
   - `<stage_name>: str` --- Stage name.
@@ -899,10 +1383,15 @@ Options available in `builder.yml`:
   - `rpm: str` --- RPM content.
   - `deb: str` --- Debian content.
   - `iso: str` --- ISO content.
+  - `windows: str` --- Windows content.
 
 - `cache: Dict` --- List of distributions cache options.
   - `<distribution_name>: Dict` --- Distribution name provided as in `distributions`.
-    - `packages: List[str]` --- List of packages to download and to put in cache. These packages won't be installed into the base chroot.
+    - `packages: List[str]` --- List of packages to pre-populate in the chroot cache. By default they are downloaded but not installed into the base chroot. Use `install-packages: true` to install them directly.
+    - `install-packages: bool` --- When `true`, the packages listed in `packages` are installed into the base chroot at `init-cache` time, so every subsequent build starts with them already present. When `false` (default), they are only downloaded into the package manager cache. Toggling this flag forces the chroot to be rebuilt. The behaviour differs slightly per distribution:
+      - RPM (Mock): the post-install chroot root is re-archived into `root_cache/cache.tar.gz` so future `--no-clean` builds restore the installed state.
+      - Debian (pbuilder): `pbuilder update --extrapackages` installs the packages into `base.tgz`.
+      - Arch Linux: `mkarchroot` always installs packages into the chroot; the flag is accepted for consistency and to invalidate the cache on toggle.
   - `templates: List[str]` --- List of template names to download and put in installer cache. They are available based on what is defined in selected kickstart.
 
 - `automatic-upload-on-publish: bool` --- Automatic upload on publish/unpublish.
@@ -1004,6 +1493,55 @@ distributions:
   - `sign-key-name: str` --- name of the signing key to use. For test keys this becomes the subject of the self-signed certificate.
   - `test-sign: bool` --- code signing type, `true` (default) or `false`. Test signing generates ephemeral self-signed
     keys for each component. Production signing uses an already existing key signed by a public CA (TODO: HSM).
+
+### Windows publish
+
+Windows artifacts are published by the `publish_windows` plugin.
+Unlike RPM and Debian packages, Windows components use Authenticode signing during the `build` stage rather than GPG, so the standard `sign-key` check is bypassed.
+
+**Stages**
+
+The `sign` stage for Windows is a no-op: Authenticode signing is done during `build`. It must still be run before `publish` because it creates the sign artifact info files that downstream stages depend on. The typical command sequence is:
+
+```bash
+./qb -d vm-win10 package build sign publish
+```
+
+**Configuration**
+
+Publishing requires `repository-publish: components` to be set in `builder.yml`:
+
+```yaml
+repository-publish:
+  components: current-testing
+```
+
+To upload published artifacts to a remote host, set `repository-upload-remote-host: windows`:
+
+```yaml
+repository-upload-remote-host:
+  windows: user@host:/path/to/windows/r4.2
+```
+
+To also GPG-sign the `SHA256SUMS` manifest, set the `sign-key: windows` fingerprint:
+
+```yaml
+sign-key:
+  windows: <GPG fingerprint>
+```
+
+**Published layout**
+
+Published artifacts are hardlinked from the build stage into a versioned directory tree under `repository-publish/`:
+
+```
+repository-publish/windows/<qubes-release>/<repository>/vm/<dist>/<component>_<version>/
+    bin/            # Authenticode-signed binaries (.exe, .dll, .sys, ...)
+    SHA256SUMS      # present only if sign-key: windows is configured
+    SHA256SUMS.asc  # GPG detached signature of SHA256SUMS
+```
+
+Only `bin/` files are published. Build-only artifacts (`inc/`, `lib/`) and the Authenticode certificate (`sign.crt`) remain in the build artifacts directory (`artifacts/components/`) and are not copied to `repository-publish/`.
 
 ### Cross-distribution dependencies
 

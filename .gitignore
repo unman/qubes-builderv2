@@ -2,9 +2,13 @@
 **__pycache__
 .coverage
 artifacts
+artifacts-*/
+benchmark-results.csv
 mypy.xml
 pylint.xml
 builder.yml
 builder.yml.bak
 test.py
 builder.lock
+**.exe
+**.msi

@@ -18,9 +18,8 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 import re
 from copy import deepcopy
-from graphlib import TopologicalSorter
 from pathlib import Path
-from typing import Union, List, Dict, Any
+from typing import Union, List, Dict, Any, Optional
 
 import yaml
 
@@ -36,19 +35,15 @@ from qubesbuilder.executors.qubes import (
     WindowsQubesExecutor,
 )
 from qubesbuilder.executors.windows import SSHWindowsExecutor
+from qubesbuilder.jobs import JobFactory
+from qubesbuilder.log import QubesBuilderLogger
 from qubesbuilder.pluginmanager import PluginManager
 from qubesbuilder.plugins import (
-    DistributionPlugin,
-    DistributionComponentPlugin,
-    ComponentPlugin,
-    TemplatePlugin,
     JobReference,
     JobDependency,
     Plugin,
 )
 from qubesbuilder.template import QubesTemplate
-from qubesbuilder.log import QubesBuilderLogger
-
 
 QUBES_RELEASE_RE = re.compile(r"r([1-9]\.[0-9]+).*")
 QUBES_RELEASE_DEFAULT = "r4.2"
@@ -74,7 +69,7 @@ def deep_merge(a: dict, b: dict, allow_append: bool = False) -> dict:
     result = deepcopy(a)
     for b_key, b_value in b.items():
         a_value = result.get(b_key, None)
-        if isinstance(a_value, dict) and isinstance(b_value, dict):
+        if isinstance(a_value, dict) and isinstance(b_value, dict) and b_value:
             result[b_key] = deep_merge(a_value, b_value, allow_append)
         else:
             if isinstance(result.get(b_key, None), list) and allow_append:
@@ -109,12 +104,15 @@ class Config:
             PROJECT_PATH / "qubesbuilder" / "plugins"
         ]
 
+        # Session (context object only for now)
+        self._session = None
+
     # fmt: off
     # Mypy does not support this form yet (see https://github.com/python/mypy/issues/8083).
     verbose: Union[bool, property]                       = property(lambda self: self.get("verbose", False))
     debug: Union[bool, property]                         = property(lambda self: self.get("debug", False))
     force_fetch: Union[bool, property]                   = property(lambda self: self.get("force-fetch", False))
-    skip_git_fetch: Union[bool, property]                = property(lambda self: self.get("skip-git-fetch", False))
+    skip_git_fetch: Union[bool, property]                = property(lambda self: self.get("skip-git-fetch", True))
     fetch_versions_only: Union[bool, property]           = property(lambda self: self.get("fetch-versions-only", False))
     backend_vmm: Union[str, property]                    = property(lambda self: self.get("backend-vmm", ""))
     use_qubes_repo: Union[Dict, property]                = property(lambda self: self.get("use-qubes-repo", {}))
@@ -134,6 +132,7 @@ class Config:
     iso_is_final: Union[bool, property]                  = property(lambda self: self.get("iso", {}).get("is-final", False))
     increment_devel_versions: Union[bool, property]      = property(lambda self: self.get("increment-devel-versions", False))
     automatic_upload_on_publish: Union[bool, property]   = property(lambda self: self.get("automatic-upload-on-publish", False))
+    session: Union[Any, property]                        = property(lambda self: self.get("session", None))
     # fmt: on
 
     def __repr__(self):
@@ -201,8 +200,10 @@ class Config:
                     "stages",
                     "plugins",
                 ):
-                    if isinstance(combined_conf[key], dict) and isinstance(
-                        options[key], dict
+                    if (
+                        isinstance(combined_conf[key], dict)
+                        and isinstance(options[key], dict)
+                        and options[key]
                     ):
                         combined_conf[key] = deep_merge(
                             combined_conf[key], options[key]
@@ -348,6 +349,15 @@ class Config:
             return result
         return self._components
 
+    def get_component(self, component_name):
+        filtered_components = self.get_components(
+            filtered_components=[component_name]
+        )
+        if not filtered_components:
+            return None
+        else:
+            return filtered_components[0]
+
     @property
     def artifacts_dir(self):
         if not self._artifacts_dir:
@@ -413,12 +423,7 @@ class Config:
     def get_executor_options_from_config(
         self,
         stage_name: str,
-        plugin: Union[
-            DistributionPlugin,
-            DistributionComponentPlugin,
-            ComponentPlugin,
-            TemplatePlugin,
-        ] = None,
+        plugin: Optional[Plugin] = None,
     ):
         dist = None
         component = None
@@ -502,12 +507,7 @@ class Config:
     def get_executor_from_config(
         self,
         stage_name: str,
-        plugin: Union[
-            DistributionPlugin,
-            DistributionComponentPlugin,
-            ComponentPlugin,
-            TemplatePlugin,
-        ] = None,
+        plugin: Optional[Plugin] = None,
     ):
         executor_options = self.get_executor_options_from_config(
             stage_name, plugin
@@ -614,12 +614,15 @@ class Config:
         return config_path
 
     def parse_qubes_release(self):
+        qubes_release = self.qubes_release
+        if qubes_release == "devel":
+            qubes_release = "99.0"
         parsed_release = QUBES_RELEASE_RE.match(
-            self.qubes_release
+            qubes_release
         ) or QUBES_RELEASE_RE.match(QUBES_RELEASE_DEFAULT)
         if not parsed_release:
             raise ConfigError(
-                f"Cannot parse Qubes OS release: '{self.qubes_release}'"
+                f"Cannot parse Qubes OS release: '{qubes_release}'"
             )
         return parsed_release
 
@@ -694,169 +697,27 @@ class Config:
                 )
         return needs
 
-    def get_jobs(
+    def get_pipeline(
         self,
         components: List[QubesComponent],
         distributions: List[QubesDistribution],
         templates: List[QubesTemplate],
         stages: List[str],
     ):
-        """
-        Collects jobs related to given constraints.
-        First collec jobs according to stage orders. But then,
-        apply topological sorting based on defined dependencies that will
-        possibly reorder jobs to satisfy dependencies.
-        """
+        factory = JobFactory(self)
+        return factory.create(components, distributions, templates, stages)
 
-        manager = self.get_plugin_manager()
-        plugins = manager.get_plugins()
-        jobs: List[Plugin] = []
-        # while collecting jobs, collect also dependency objects for later use
-        depencies_dict: dict[JobReference, Plugin] = {}
-
-        for stage in stages:
-            # DistributionComponentPlugin
-            for distribution in distributions:
-                for component in components:
-                    for plugin in plugins:
-                        if "DistributionComponentPlugin" in [
-                            c.__name__ for c in plugin.__mro__
-                        ]:
-                            job = plugin.from_args(
-                                dist=distribution,
-                                component=component,
-                                config=self,
-                                stage=stage,
-                            )
-                            if not job:
-                                continue
-                            job.dependencies += self.get_needs(
-                                component=component,
-                                dist=distribution,
-                                stage=stage,
-                            )
-                            depencies_dict[
-                                JobReference(
-                                    component=component,
-                                    dist=distribution,
-                                    template=None,
-                                    stage=stage,
-                                    build=None,
-                                )
-                            ] = job
-                            jobs.append(job)
-
-            # ComponentPlugin
-            for component in components:
-                for plugin in plugins:
-                    classes = [c.__name__ for c in plugin.__mro__]
-                    if (
-                        "ComponentPlugin" in classes
-                        and "DistributionComponentPlugin" not in classes
-                    ):
-                        job = plugin.from_args(
-                            component=component,
-                            config=self,
-                            stage=stage,
-                        )
-                        if not job:
-                            continue
-                        depencies_dict[
-                            JobReference(
-                                component=component,
-                                dist=None,
-                                template=None,
-                                stage=stage,
-                                build=None,
-                            )
-                        ] = job
-                        jobs.append(job)
-
-            # DistributionPlugin
-            for distribution in distributions:
-                for plugin in plugins:
-                    classes = [c.__name__ for c in plugin.__mro__]
-                    if (
-                        "DistributionPlugin" in classes
-                        and "DistributionComponentPlugin" not in classes
-                        and "TemplatePlugin" not in classes
-                    ):
-                        job = plugin.from_args(
-                            dist=distribution,
-                            config=self,
-                            stage=stage,
-                        )
-                        if not job:
-                            continue
-                        depencies_dict[
-                            JobReference(
-                                component=None,
-                                dist=distribution,
-                                template=None,
-                                stage=stage,
-                                build=None,
-                            )
-                        ] = job
-                        jobs.append(job)
-
-            # TemplatePlugin
-            for template in templates:
-                for plugin in plugins:
-                    classes = [c.__name__ for c in plugin.__mro__]
-                    if "TemplatePlugin" in classes:
-                        job = plugin.from_args(
-                            template=template,
-                            config=self,
-                            stage=stage,
-                        )
-                        if not job:
-                            continue
-                        depencies_dict[
-                            JobReference(
-                                component=None,
-                                dist=None,
-                                template=template,
-                                stage=stage,
-                                build=None,
-                            )
-                        ] = job
-                        jobs.append(job)
-
-        # and finally, sort topologically to resolve any dependencies
-        graph = {}
-        for job in jobs:
-            deps = []
-            for dep in job.dependencies:
-                if dep.builder_object == "job":
-                    try:
-                        # don't care about "build" part
-                        dep_job = depencies_dict[
-                            JobReference(
-                                dep.reference.component,
-                                dep.reference.dist,
-                                dep.reference.template,
-                                dep.reference.stage,
-                                build=None,
-                            )
-                        ]
-                    except KeyError:
-                        continue
-                    deps.append(dep_job)
-                elif dep.builder_object == "component":
-                    try:
-                        dep_job = depencies_dict[
-                            JobReference(
-                                component=dep.reference.component,
-                                dist=None,
-                                template=None,
-                                stage="fetch",
-                                build="source",
-                            )
-                        ]
-                    except KeyError:
-                        continue
-                    deps.append(dep_job)
-            graph[job] = deps
-        ts = TopologicalSorter(graph)
-        jobs = list(ts.static_order())
-        return jobs
+    def get_jobs(
+        self,
+        components: List[QubesComponent],
+        distributions: List[QubesDistribution],
+        templates: List[QubesTemplate],
+        stages: List[str],
+        with_dependencies: bool = True,
+    ):
+        pipeline = self.get_pipeline(
+            components, distributions, templates, stages
+        )
+        if not with_dependencies:
+            return list(pipeline)
+        return pipeline.sorted_jobs(self)

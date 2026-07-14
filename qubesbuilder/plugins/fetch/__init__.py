@@ -28,10 +28,11 @@ from shlex import quote
 from typing import Any, List, Union
 
 from qubesbuilder.common import VerificationMode, get_archive_name
+from qubesbuilder.component import QubesComponent
 from qubesbuilder.exc import NoQubesBuilderFileError
 from qubesbuilder.executors import ExecutorError
 from qubesbuilder.executors.local import LocalExecutor
-from qubesbuilder.plugins import ComponentPlugin, PluginError
+from qubesbuilder.plugins import Plugin, PluginContext, PluginError
 
 
 class FetchError(PluginError):
@@ -42,7 +43,9 @@ def quote_list(args: List[Union[str, Path]]) -> str:
     return " ".join(map(lambda x: quote(str(x)), args))
 
 
-class FetchPlugin(ComponentPlugin):
+class FetchPlugin(Plugin):
+    context = PluginContext.COMPONENT
+    component: QubesComponent
     """
     FetchPlugin manages generic fetch source
 
@@ -71,7 +74,7 @@ class FetchPlugin(ComponentPlugin):
             return
         self._parameters[stage].update(parameters.get("source", {}))
 
-    def run(self):
+    def run(self, **kwargs):
         """
         Run plugin for given stage.
         """
@@ -459,7 +462,7 @@ class FetchPlugin(ComponentPlugin):
         cmd = [
             f"cd {str(executor.get_builder_dir())}",
             " ".join(get_sources_cmd),
-            f"{executor.get_plugins_dir()}/fetch/scripts/create-archive {source_dir} {archive_name} {archive_base}/",
+            f"{executor.get_plugins_dir()}/fetch/scripts/create-archive --no-gitignore {source_dir} {archive_name} {archive_base}/",
         ]
 
         copy_out = [(source_dir / archive_name, distfiles_dir)]
