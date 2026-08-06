@@ -259,7 +259,7 @@ class DEBBuildPlugin(BuildPlugin):
             mirrors = self.config.get("mirrors", {}).get(self.dist.fullname, [])
             if mirrors:
                 cmd += [
-                    f"sed -i 's@MIRRORSITE=https://deb.debian.org/debian@MIRRORSITE={mirrors[0]}@' {self.executor.get_builder_dir()}/pbuilder/pbuilderrc"
+                    f"sed -i 's@MIRRORSITE=http://deb.debian.org/debian@MIRRORSITE={mirrors[0]}@' {self.executor.get_builder_dir()}/pbuilder/pbuilderrc"
                 ]
 
             if self.config.use_qubes_repo.get("version", None):
@@ -269,7 +269,7 @@ class DEBBuildPlugin(BuildPlugin):
                     else "deb.qubes-os.org"
                 )
                 qubes_version = self.config.use_qubes_repo["version"]
-                extra_sources = f"{extra_sources}|deb [arch=amd64] https://{repo_server}/r{qubes_version}/vm {self.dist.name} main"
+                extra_sources = f"{extra_sources}|deb [arch=amd64] http://HTTPS///{repo_server}/r{qubes_version}/vm {self.dist.name} main"
                 keyring_file = (
                     f"qubes-{self.dist.fullname}-r{qubes_version}.asc"
                 )
