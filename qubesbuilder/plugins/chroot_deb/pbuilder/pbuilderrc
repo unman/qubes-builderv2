@@ -6,7 +6,7 @@
 # W => errors and warnings
 # I => errors, warnings and informational
 # D => all of the above and debug messages
-LOGLEVEL=I
+LOGLEVEL=D
 # if positive, some log messagges (errors, warnings, debugs) will be colored
 # auto => try automatically detection
 # yes  => always use colors
@@ -24,7 +24,7 @@ case ${DISTRIBUTION} in
         ;;
     jammy|noble|questing)
         DIST_VENDOR=ubuntu
-        MIRRORSITE=http://10.137.0.68:8082/archive.ubuntu.com/ubuntu
+        MIRRORSITE=http://10.137.0.16:8082/archive.ubuntu.com/ubuntu
         ;;
     *)
         echo "Unknown distribution: ${DISTRIBUTION}" >&2
@@ -44,7 +44,7 @@ BUILDDIR=/build
 BUILD_HOME=/nonexistent
 #OTHERMIRROR="deb http://www.home.com/updates/ ./"
 #export http_proxy=http://your-proxy:8080/
-export http_proxy=http://10.137.0.68:8082/
+export http_proxy=http://10.137.0.16:8082/
 USEPROC=yes
 USEDEVFS=no
 USEDEVPTS=yes
