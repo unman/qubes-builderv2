@@ -345,35 +345,6 @@ class TemplateBuilderPlugin(TemplatePlugin):
                         "DERIVATIVE_APT_REPOSITORY_OPTS": "stable",
                     }
                 )
-            if self.template.flavor.startswith("kali"):
-                component = self.config.get_component("template-kali")
-                self.dependencies += [
-                    JobDependency(
-                        JobReference(
-                            component=component,
-                            stage="fetch",
-                            build="source",
-                            dist=None,
-                            template=None,
-                        )
-                    ),
-                ]
-                template_content_dir = str(
-                    self.executor.get_sources_dir() / "template-kali"
-                )
-                self.environment.update(
-                    {
-                        "APPMENUS_DIR": template_content_dir,
-                        "FLAVORS_DIR": template_content_dir,
-                    }
-                )
-                template_flavor_dir += [
-                    f"+kali:{self.executor.get_sources_dir()}/template-kali",
-                    f"+kali-core:{self.executor.get_sources_dir()}/template-kali",
-                    f"+kali-large:{self.executor.get_sources_dir()}/template-kali",
-                    f"+kali-everything:{self.executor.get_sources_dir()}/template-kali",
-                ]
-
         elif self.template.distribution.is_archlinux():
             component = self.config.get_component("builder-archlinux")
             self.dependencies += [
